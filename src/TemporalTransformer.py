@@ -37,7 +37,7 @@ class TemporalCrossTransformer(nn.Module):
                  radar_dim=512, radar_seq=192,
                  scene_dim=2048, scene_seq=16,
                  detection_dim=100, detection_seq=1,
-                 actions_dim=24, actions_seq=192,
+                 actions_dim=22, actions_seq=192, #actions_dim=24
                  state_dim=95,
                  d_model=512, num_heads=8, depth=6,
                  ff_mult=4, dropout=0.1):
@@ -78,13 +78,13 @@ class TemporalCrossTransformer(nn.Module):
             nn.LayerNorm(d_model),
             nn.Linear(d_model, 256),
             nn.GELU(),
-            nn.Linear(256, 8)  # регрессия x,y мыши
+            nn.Linear(256, 2)  # регрессия x,y мыши
         )
         self.policy_keys_head = nn.Sequential(
             nn.LayerNorm(d_model),
             nn.Linear(d_model, 256),
             nn.GELU(),
-            nn.Linear(256, 88)  # 10 клавиш по 4 тика например
+            nn.Linear(256, 20)  # 10 клавиш по 4 тика например
         )
         self.value_head = nn.Sequential(
             nn.LayerNorm(d_model),
@@ -133,9 +133,9 @@ class TemporalCrossTransformer(nn.Module):
 
         # === Forward through heads ===
         policy_mouse = self.policy_mouse_head(policy_mouse_embed)
-        policy_mouse = policy_mouse.view(B, 4, 2)
+        policy_mouse = policy_mouse.view(B, 2) #view(B, 4, 2)
         policy_keys = self.policy_keys_head(policy_keys_embed)
-        policy_keys = policy_keys.view(B, 4, 22)
+        policy_keys = policy_keys.view(B, 20)  #view(B, 4, 2)
         value = self.value_head(value_embed)
 
         return policy_mouse, policy_keys, value
@@ -148,13 +148,14 @@ if __name__ == "__main__":
     print(torch.cuda.is_available())
     print(torch.cuda.get_device_name(0))
     model = TemporalCrossTransformer().to('cuda')
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Обучаемых параметров: {total_params:,}")
     for i in range(100):
         radar_seq = torch.randn(1, 180, 512).to('cuda')
         scene_seq = torch.randn(1, 15, 2048).to('cuda')
-        detection_seq = torch.randn(1, 4, 128).to('cuda')
+        detection_seq = torch.randn(1, 1, 100).to('cuda')
         action_seq = torch.randn(1, 32, 64).to('cuda')
         state_vec = torch.randn(1, 16).to('cuda')
         policy_mouse, policy_keys, value = model(radar_seq, scene_seq, detection_seq, action_seq, state_vec)
         total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(i)
-    print(f"Обучаемых параметров: {total_params:,}")
