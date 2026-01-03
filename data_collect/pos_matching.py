@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import math
 from tqdm import tqdm
-from demo_parser2 import parse_ticks_csv
+from data_collect.demo_parser import parse_ticks_csv
 
 
 def angle_in_cone(angle, left, right):
@@ -111,14 +111,14 @@ if __name__ == "__main__":
     # df.to_csv('df.csv', index=False)
     # df = pd.read_csv('df.csv')
 
-    bomb_orange = cv2.imread('bomb_dropped_crop.jpg')
-    bomb_yellow = cv2.imread('orange_to_yellow.png')
-    bomb_violet = cv2.imread('orange_to_violet.png')
-    bomb_red = cv2.imread('orange_to_red.png')
-    bomb_white = cv2.imread('orange_to_white.png')
-    bomb_green = cv2.imread('orange_to_green.png')
-    bomb_blue = cv2.imread('orange_to_cyan.png')
-    img = cv2.imread('vanila_radar.jpg')
+    bomb_orange = cv2.imread(r'tampletes\bomb_dropped_crop.jpg')
+    bomb_yellow = cv2.imread(r'tampletes\orange_to_yellow.png')
+    bomb_violet = cv2.imread(r'tampletes\orange_to_violet.png')
+    bomb_red = cv2.imread(r'tampletes\orange_to_red.png')
+    bomb_white = cv2.imread(r'tampletes\orange_to_white.png')
+    bomb_green = cv2.imread(r'tampletes\orange_to_green.png')
+    bomb_blue = cv2.imread(r'tampletes\orange_to_cyan.png')
+    img = cv2.imread(r'tampletes\vanila_radar.jpg')
     img = img[8:425, 10:574]
     # cv2.imwrite('crop_radar.jpg', img)
     tmp_df = df[df['tick'] == 1000]

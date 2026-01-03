@@ -2,21 +2,21 @@ import cv2
 import os
 from tqdm import tqdm
 from demoparser2 import DemoParser
-from pos_matching import radar_pos_matching
-from demo_parser2 import parse_ticks_csv
+from data_collect.pos_matching import radar_pos_matching
+from data_collect.demo_parser import parse_ticks_csv
 
 
 output_main_dir = r"D:\FramesDataset"
 cs_dir = r'C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive\game\csgo'
 record_demo_dir = r'D:\RecordDemos'
-bomb_orange = cv2.imread('bomb_dropped_crop.jpg')
-bomb_yellow = cv2.imread('orange_to_yellow.png')
-bomb_violet = cv2.imread('orange_to_violet.png')
-bomb_red = cv2.imread('orange_to_red.png')
-bomb_white = cv2.imread('orange_to_white.png')
-bomb_green = cv2.imread('orange_to_green.png')
-bomb_blue = cv2.imread('orange_to_cyan.png')
-img = cv2.imread('vanila_radar.jpg')
+bomb_orange = cv2.imread(r'tampletes\bomb_dropped_crop.jpg')
+bomb_yellow = cv2.imread(r'tampletes\orange_to_yellow.png')
+bomb_violet = cv2.imread(r'tampletes\orange_to_violet.png')
+bomb_red = cv2.imread(r'tampletes\orange_to_red.png')
+bomb_white = cv2.imread(r'tampletes\orange_to_white.png')
+bomb_green = cv2.imread(r'tampletes\orange_to_green.png')
+bomb_blue = cv2.imread(r'tampletes\orange_to_cyan.png')
+img = cv2.imread(r'tampletes\vanila_radar.jpg')
 img = img[8:425, 10:574]
 target_steam = 76561198386265483
 size = 15
