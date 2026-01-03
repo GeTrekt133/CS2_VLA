@@ -159,13 +159,16 @@ class CSRoundDataset(Dataset):
         scene_indices = list(range(start, i + 1, 4))
         scene_frames = []
         for j in scene_indices:
-            tick = sample["start_tick"] + j
+            tick = states[j]["tick"]
+            # print(f"scene tick - {tick}")
             frame_path = os.path.join(demo_path, f"tick_{tick}.jpg")
             if os.path.exists(frame_path):
                 img = self._load_image(frame_path)
                 if self.transform_scene:
                     img = self.transform_scene(img)
                 scene_frames.append(img)
+            else:
+                print(f"Path not exists: {frame_path}")
         if len(scene_frames) == 0:
             scene_frames.append(np.zeros((640, 640, 3), dtype=np.float32))
         scene_seq = torch.tensor(np.stack(scene_frames), dtype=torch.float32)
@@ -177,7 +180,8 @@ class CSRoundDataset(Dataset):
         radar_frames = []
         for j in radar_indices:
             tick = states[j]["tick"]
-            frame_path = os.path.join(demo_path, f"tick_{tick}.jpg")
+            # print(f"radar tick - {tick}")
+            # frame_path = os.path.join(demo_path, f"tick_{tick}.jpg")
             if os.path.exists(frame_path):
                 img = self._load_image(frame_path)
                 radar = self._crop_radar(img)
@@ -192,7 +196,9 @@ class CSRoundDataset(Dataset):
         actions_mouse = []
         actions_keys = []
         for j in range(max(0, i - self.action_window), i):
-            st = self.targets[j]["states"][self.targets[j]["tick_idx"]]
+            tick = states[j]["tick"]
+            st = states[j]
+            # print("action tick - ", tick)
             mouse = np.array(st["mouse"], dtype=np.float32)
             keys_vec = self._encode_keys(st["keys"])
             actions_mouse.append(mouse)
@@ -206,6 +212,7 @@ class CSRoundDataset(Dataset):
 
         # === 4️⃣ СОСТОЯНИЕ ===
         st = states[i]
+        # print(f"state tick - {st['tick']}")
         state_vec = np.concatenate([
             np.array([
                 st["hp"] / 100.0,
@@ -223,13 +230,14 @@ class CSRoundDataset(Dataset):
             np.array(self._encode_weapon_list(st["weapon_list"]))
         ])
         state_vec = torch.tensor(state_vec, dtype=torch.float32)
-
+        
         # === 5️⃣ ЛЕЙБЛЫ (текущий тик + 3 следующих из self.targets) ===
         label_mouse = []
         label_keys = []
         for j in range(i, i + 4):
             if j < len(self.targets):
-                st = self.targets[j]["states"][self.targets[j]["tick_idx"]]
+                st = states[j]
+                # print(f"targets tick - {st['tick']}")
                 mouse = np.array(st["mouse"], dtype=np.float32)
                 keys_vec = self._encode_keys(st["keys"])
                 label_mouse.append(mouse)
@@ -240,11 +248,11 @@ class CSRoundDataset(Dataset):
         label_mouse = torch.tensor(np.stack(label_mouse), dtype=torch.float32)
         label_keys = torch.tensor(np.stack(label_keys), dtype=torch.float32)
         # print(label_keys.shape)
-
+        
         return {
             "game_id": sample["game_id"],
             "round_id": sample["round_id"],
-            "tick": st["tick"],
+            "tick": states[i]["tick"],
             "scene_seq": scene_seq,       # (T, C, H, W)
             "radar_seq": radar_seq,       # (T, C, H_r, W_r)
             "actions_mouse": actions_mouse,   # "mouse": (192, 2)
@@ -253,4 +261,3 @@ class CSRoundDataset(Dataset):
             "labels_mouse": label_mouse,     # (4, 2)
             "labels_keys": label_keys        # (4, 10)
         }
-        
