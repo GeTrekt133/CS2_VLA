@@ -16,3 +16,7 @@ radar_dataset_mirage
 runs
 data.json
 *.csv
+cluster_embeddings.py
+query_embeddings.py
+*bbox*
+detect/screenshots
