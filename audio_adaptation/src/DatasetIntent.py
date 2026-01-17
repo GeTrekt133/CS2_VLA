@@ -43,11 +43,10 @@ class CSRoundDataset(Dataset):
     - Output: (480000,) mono waveform
     """
 
-    # Audio constants
+    # Audio constants (base values, will be adjusted in __init__ based on speedup)
     AUDIO_SAMPLE_RATE = 16000
-    AUDIO_WINDOW_SEC = 30.0
-    AUDIO_WINDOW_SAMPLES = int(AUDIO_WINDOW_SEC * AUDIO_SAMPLE_RATE)  # 480000
-    TICK_RATE = 64  # CS2 demo tickrate
+    BASE_TICK_RATE = 64  # Standard CS2 tickrate
+    BASE_AUDIO_WINDOW_SEC = 30.0
 
     def __init__(
         self,
@@ -64,6 +63,7 @@ class CSRoundDataset(Dataset):
         # Audio settings (NEW)
         use_audio: bool = True,
         audio_dir: Optional[str] = None,  # If None, looks for audio in demo_path
+        audio_speedup_factor: float = 4.0,  # Audio speedup (4x = 4 seconds of game time per 1 sec audio)
     ):
         self.dataset_json = dataset_json
         self.T_min = T_min
@@ -80,6 +80,12 @@ class CSRoundDataset(Dataset):
         # Audio settings
         self.use_audio = use_audio and TORCHAUDIO_AVAILABLE
         self.audio_dir = audio_dir
+        self.audio_speedup_factor = audio_speedup_factor
+
+        # Calculate adjusted constants based on speedup
+        self.AUDIO_WINDOW_SEC = self.BASE_AUDIO_WINDOW_SEC / audio_speedup_factor  # 7.5 for 4x speedup
+        self.AUDIO_WINDOW_SAMPLES = int(self.AUDIO_WINDOW_SEC * self.AUDIO_SAMPLE_RATE)  # 120000
+        self.TICK_RATE = self.BASE_TICK_RATE * audio_speedup_factor  # 256 for 4x speedup
 
         # Audio cache to avoid reloading
         self._audio_cache = {}
@@ -264,7 +270,14 @@ class CSRoundDataset(Dataset):
         round_start_tick: int
     ) -> torch.Tensor:
         """
-        Extract 30 second audio window ending at current tick.
+        Extract audio window ending at current tick.
+        Window duration adjusted for audio speedup factor.
+        Output is padded to fixed size (480000) for AudioEncoder.
+
+        For 4x speedup:
+        - Extracts 7.5 seconds of accelerated audio (120000 samples)
+        - Represents 30 seconds of game time
+        - Pads to (480000,) for AudioEncoder compatibility
 
         Args:
             audio_path: Path to round audio file
@@ -274,13 +287,15 @@ class CSRoundDataset(Dataset):
         Returns:
             audio_window: (480000,) tensor or zeros if not available
         """
+        FIXED_ENCODER_INPUT = 480000
+
         if not self.use_audio:
-            return torch.zeros(self.AUDIO_WINDOW_SAMPLES, dtype=torch.float32)
+            return torch.zeros(FIXED_ENCODER_INPUT, dtype=torch.float32)
 
         waveform = self._load_audio_cached(audio_path)
 
         if waveform is None:
-            return torch.zeros(self.AUDIO_WINDOW_SAMPLES, dtype=torch.float32)
+            return torch.zeros(FIXED_ENCODER_INPUT, dtype=torch.float32)
 
         # Calculate audio position
         # Ticks since round start
@@ -308,13 +323,23 @@ class CSRoundDataset(Dataset):
 
         # Pad if needed (at start of round)
         if audio_window.shape[0] < self.AUDIO_WINDOW_SAMPLES:
-            padding = self.AUDIO_WINDOW_SAMPLES - audio_window.shape[0]
+            padding_needed = self.AUDIO_WINDOW_SAMPLES - audio_window.shape[0]
             audio_window = torch.cat([
-                torch.zeros(padding, dtype=torch.float32),
+                torch.zeros(padding_needed, dtype=torch.float32),
                 audio_window
             ])
 
-        return audio_window
+        # Pad to fixed size for AudioEncoder (480000 samples)
+        # This ensures compatibility even with speedup_factor > 1
+        FIXED_ENCODER_INPUT = 480000
+        if audio_window.shape[0] < FIXED_ENCODER_INPUT:
+            padding_needed = FIXED_ENCODER_INPUT - audio_window.shape[0]
+            audio_window = torch.nn.functional.pad(audio_window, (0, padding_needed))
+        elif audio_window.shape[0] > FIXED_ENCODER_INPUT:
+            # Should not happen with speedup_factor >= 1, but handle it
+            audio_window = audio_window[:FIXED_ENCODER_INPUT]
+
+        return audio_window  # Always (480000,)
 
     # =====================================================
     def __getitem__(self, idx: int) -> Dict[str, Any]:

@@ -208,10 +208,10 @@ def train():
     device = "cuda"
     RUN_NAME = datetime.now().strftime("run_%Y-%m-%d_%H-%M-%S")
     CKPT_ROOT = "./checkpoints2"
-    DATA_ROOT = "/mnt/ml/msirotkin/shock2/FramesDataset"  # Root directory for frame data
-    TRAIN_DATASET_JSON = "/mnt/ml/msirotkin/shock2/train_dataset.json"
-    VAL_DATASET_JSON = "/mnt/ml/msirotkin/shock2/val_dataset.json"
-    AUDIO_DIR = "/mnt/ml/msirotkin/shock2/audio"  # Audio data directory (NEW)
+    DATA_ROOT = r"c:\Users\misas\CS2_NN\FramesDataset"  # Root directory for frame data
+    TRAIN_DATASET_JSON = r"c:\Users\misas\CS2_NN\train_dataset.json"
+    VAL_DATASET_JSON = r"c:\Users\misas\CS2_NN\val_dataset.json"
+    AUDIO_DIR = r"D:\AudioData"  # Audio data directory (NEW)
 
     BATCH_SIZE = 4
     NUM_EPOCHS = 50
@@ -238,12 +238,14 @@ def train():
     train_dataset = CSRoundDataset(
         TRAIN_DATASET_JSON,
         use_audio=USE_AUDIO,
-        audio_dir=AUDIO_DIR
+        audio_dir=AUDIO_DIR,
+        audio_speedup_factor=4.0
     )
     val_dataset = CSRoundDataset(
         VAL_DATASET_JSON,
         use_audio=USE_AUDIO,
-        audio_dir=AUDIO_DIR
+        audio_dir=AUDIO_DIR,
+        audio_speedup_factor=4.0
     )
 
     train_sampler = ExactMatchBucketSampler(
