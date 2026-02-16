@@ -19,4 +19,5 @@ data.json
 cluster_embeddings.py
 query_embeddings.py
 *bbox*
-detect/screenshots
+detect/screenshots/
+detect/comparison_output/
