@@ -25,4 +25,5 @@ detect/comparison_output/
 *json
 detect/test_output/
 detect/viz*
+*__pycache__*
 nul
