@@ -21,3 +21,6 @@ query_embeddings.py
 *bbox*
 detect/screenshots/
 detect/comparison_output/
+*lgb
+*json
+nul

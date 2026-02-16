@@ -26,6 +26,7 @@ import pyautogui
 import threading
 from tqdm import tqdm
 from typing import Optional
+import keyboard  # For Escape listener
 
 # Import audio recorder
 from audio_capture import AudioRecorder, AudioConfig
@@ -67,6 +68,9 @@ class CS2DemoRecorder:
         # F1 spam thread control
         self._spam_active = False
         self._spam_thread: Optional[threading.Thread] = None
+
+        # Escape listener control
+        self._stop_requested = False
 
     def _spam_f1(self):
         """Background thread to spam F1 key."""
@@ -144,12 +148,13 @@ class CS2DemoRecorder:
         pyautogui.moveTo(x, y - 1000)
         time.sleep(0.5)
 
-        # Setup demo UI and timescale
+        # Setup demo UI (NO TIMESCALE - record at normal speed)
         pyautogui.typewrite('demoui\n')
         time.sleep(0.5)
 
-        pyautogui.typewrite('demo_timescale 4\n')
-        time.sleep(0.5)
+        # IMPORTANT: Do NOT use demo_timescale for audio synchronization
+        # pyautogui.typewrite('demo_timescale 1\n')  # Already default
+        # time.sleep(0.5)
 
         # Bind F1 to follow player
         pyautogui.typewrite(f'bind "F1" "spec_player {user_id}"\n')
@@ -181,20 +186,21 @@ class CS2DemoRecorder:
         time.sleep(0.5)
 
         pyautogui.typewrite(f'demo_gototick {start_tick}\n')
-        time.sleep(0.5)
+        time.sleep(3)  # Wait for seek to complete (large demos need more time)
 
         pyautogui.press("`")
         time.sleep(0.5)
 
-        # Start recording (video + audio)
+        # Resume playback FIRST, then start recording
+        # This avoids recording silence/static frame at the beginning
+        pyautogui.press('f5')
+        time.sleep(0.3)  # Small delay to let playback start
+
+        # Start recording (video + audio) AFTER playback is running
         if self.record_audio and self.audio_recorder:
             self.audio_recorder.start_recording(f"round_{round_id}.wav")
 
         self.obs_client.start_record()
-        time.sleep(0.5)
-
-        # Resume playback
-        pyautogui.press('f5')
 
         # Wait for round duration
         time.sleep(duration_seconds)
@@ -209,10 +215,23 @@ class CS2DemoRecorder:
 
         print(f"  Round {round_id} recorded ({duration_seconds:.1f}s)")
 
+    def _check_stop_requested(self):
+        """Check if user pressed Escape to stop."""
+        return self._stop_requested
+
+    def _on_escape_press(self):
+        """Handle Escape key press."""
+        print("\n[ESCAPE] Stop requested by user!")
+        self._stop_requested = True
+        self._stop_f1_spam()
+
     def process_demo(self, demo_path: str, skip_first_rounds: int = 3):
         """Process a single demo file."""
         demo_name = os.path.basename(demo_path)[:-4]  # Remove .dem
         print(f"\nProcessing demo: {demo_name}")
+
+        # Reset stop flag
+        self._stop_requested = False
 
         try:
             # Parse demo
@@ -227,9 +246,14 @@ class CS2DemoRecorder:
             ticks_df = parser.parse_ticks(['user_id', 'steamid'])
             max_tick = int(ticks_df.iloc[-1]['tick'])
 
-            # Find user ID
-            tmp_df = ticks_df[ticks_df['tick'] == 300]
-            user_id = int(tmp_df[tmp_df['steamid'] == self.steam_id]['user_id']) + 1
+            # Find user ID (use first round start tick where player definitely exists)
+            lookup_tick = round_start_ticks[0] if round_start_ticks else 300
+            tmp_df = ticks_df[ticks_df['tick'] == lookup_tick]
+            player_rows = tmp_df[tmp_df['steamid'] == self.steam_id]['user_id']
+            if player_rows.empty:
+                print(f"  Player {self.steam_id} not found at tick {lookup_tick}")
+                return False
+            user_id = int(player_rows.iloc[0]) + 1
 
             # Setup directories
             video_save_dir = os.path.join(self.record_dir, demo_name)
@@ -244,13 +268,18 @@ class CS2DemoRecorder:
 
             # Record each round
             for i, start_tick in enumerate(round_start_ticks):
-                # Calculate round duration
-                if i == len(round_start_ticks) - 1:
-                    round_dur = max((max_tick - start_tick) // 256 - 25, 5)
-                else:
-                    round_dur = (round_start_ticks[i + 1] - start_tick) // 256
+                # Check if stop requested
+                if self._check_stop_requested():
+                    print(f"  Stopping at round {i} (user request)")
+                    break
 
-                print(f"  Recording round {i}...")
+                # Calculate round duration (at normal speed, NO timescale)
+                if i == len(round_start_ticks) - 1:
+                    round_dur = max((max_tick - start_tick) // 64 - 25, 5)  # 64 tickrate, not 256
+                else:
+                    round_dur = (round_start_ticks[i + 1] - start_tick) // 64  # 64 tickrate
+
+                print(f"  Recording round {i} (duration: {round_dur}s)...")
                 self.record_round(i, start_tick, round_dur, video_save_dir)
 
             # Stop F1 spam
@@ -269,6 +298,10 @@ class CS2DemoRecorder:
         demos = [f for f in os.listdir(self.demo_dir) if f.endswith('.dem')]
         print(f"Found {len(demos)} demos")
 
+        # Setup Escape listener
+        keyboard.on_press_key('esc', lambda _: self._on_escape_press())
+        print("Press ESCAPE at any time to stop recording")
+
         # Start OBS
         self.start_obs()
 
@@ -281,11 +314,19 @@ class CS2DemoRecorder:
             if i < start_index:
                 continue
 
+            # Check if stop requested
+            if self._check_stop_requested():
+                print(f"\nStopping at demo {i} (user request)")
+                break
+
             demo_path = os.path.join(self.demo_dir, demo)
             success = self.process_demo(demo_path)
 
             if not success:
                 print(f"  Failed to process {demo}")
+
+        # Cleanup
+        keyboard.unhook_all()
 
 
 def main():

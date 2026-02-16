@@ -36,6 +36,9 @@ team_colors = [
     (255, 0, 0),    # синий
 ]
 
+TICKRATE = 64
+SKIP_FRAMES = 7  # Skip initial frames (loading delay ~0.12s at 60fps)
+
 for demo in tqdm(os.listdir(record_demo_dir)):
     demo_path = os.path.join(cs_dir, f'{demo}.dem')
     parser = DemoParser(demo_path)
@@ -48,7 +51,14 @@ for demo in tqdm(os.listdir(record_demo_dir)):
     round_start_ticks = list(start_df['tick'][3:])
     demo_dir = os.path.join(record_demo_dir, demo)
     print(round_start_ticks)
-    for i, round in enumerate(os.listdir(demo_dir)):
+
+    # Sort video files by round number to ensure correct order
+    video_files = sorted(
+        [f for f in os.listdir(demo_dir) if f.endswith('.mp4')],
+        key=lambda f: int(''.join(filter(str.isdigit, os.path.splitext(f)[0])) or '0')
+    )
+
+    for i, video_file in enumerate(video_files):
         cd_dead = {}
         for user_id in tmp_df['user_id']:
             cd_dead[user_id] = [10, True]
@@ -58,7 +68,7 @@ for demo in tqdm(os.listdir(record_demo_dir)):
         dict_colors[-1] = (0, 0, 255)
         output_dir = os.path.join(output_main_dir, demo)
         os.makedirs(output_dir, exist_ok=True)
-        video_path = os.path.join(demo_dir, round)
+        video_path = os.path.join(demo_dir, video_file)
         start_tick = round_start_ticks[i] - round_start_ticks[i] % 4
         print(start_tick, round_start_ticks[i], i)
         cap = cv2.VideoCapture(video_path)
@@ -67,14 +77,18 @@ for demo in tqdm(os.listdir(record_demo_dir)):
 
         fps = cap.get(cv2.CAP_PROP_FPS)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        print(f"🎞 FPS: {fps:.2f}, кадров всего: {total_frames}")
-        frame_idx = -28
+        ticks_per_frame = TICKRATE / fps  # ~1.07 at 60fps, normal speed
+        print(f"FPS: {fps:.2f}, frames: {total_frames}, ticks/frame: {ticks_per_frame:.2f}")
+        frame_idx = -SKIP_FRAMES
         with tqdm(total=total_frames, desc="Saving frames", unit="frame") as pbar:
             while True:
                 ret, frame = cap.read()
                 if not ret:
                     break
-                tick = start_tick if frame_idx < 0 else frame_idx * 4 + start_tick
+                if frame_idx < 0:
+                    tick = start_tick
+                else:
+                    tick = start_tick + round(frame_idx * ticks_per_frame)
                 radar, cd_dead = radar_pos_matching(tick, df, img, target_steam, cd_dead, dict_colors, teammates_steamid, teammates, size, fov, base_width, length, alpha_max, left_bot, coefX, coefY, bomb_orange, bomb_yellow, bomb_violet, bomb_red, bomb_white, bomb_green, bomb_blue)
                 radar = cv2.resize(radar, (424, 314))
                 frame[6:320, 7:431] = radar
@@ -86,5 +100,5 @@ for demo in tqdm(os.listdir(record_demo_dir)):
                 pbar.update(1)
 
         cap.release()
-        print(f"✅ Сохранено кадров: {frame_idx}")
-        print(f"📂 Все кадры сохранены в: {os.path.abspath(output_dir)}")
+        print(f"Saved frames: {frame_idx}")
+        print(f"Output dir: {os.path.abspath(output_dir)}")

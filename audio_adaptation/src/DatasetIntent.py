@@ -63,7 +63,7 @@ class CSRoundDataset(Dataset):
         # Audio settings (NEW)
         use_audio: bool = True,
         audio_dir: Optional[str] = None,  # If None, looks for audio in demo_path
-        audio_speedup_factor: float = 4.0,  # Audio speedup (4x = 4 seconds of game time per 1 sec audio)
+        audio_speedup_factor: float = 1.0,  # No speedup (recording at normal speed)
     ):
         self.dataset_json = dataset_json
         self.T_min = T_min
@@ -83,9 +83,9 @@ class CSRoundDataset(Dataset):
         self.audio_speedup_factor = audio_speedup_factor
 
         # Calculate adjusted constants based on speedup
-        self.AUDIO_WINDOW_SEC = self.BASE_AUDIO_WINDOW_SEC / audio_speedup_factor  # 7.5 for 4x speedup
-        self.AUDIO_WINDOW_SAMPLES = int(self.AUDIO_WINDOW_SEC * self.AUDIO_SAMPLE_RATE)  # 120000
-        self.TICK_RATE = self.BASE_TICK_RATE * audio_speedup_factor  # 256 for 4x speedup
+        self.AUDIO_WINDOW_SEC = self.BASE_AUDIO_WINDOW_SEC / audio_speedup_factor  # 30.0 for 1x (no speedup)
+        self.AUDIO_WINDOW_SAMPLES = int(self.AUDIO_WINDOW_SEC * self.AUDIO_SAMPLE_RATE)  # 480000
+        self.TICK_RATE = self.BASE_TICK_RATE * audio_speedup_factor  # 64 for 1x (no speedup)
 
         # Audio cache to avoid reloading
         self._audio_cache = {}
@@ -119,6 +119,10 @@ class CSRoundDataset(Dataset):
         self.SIDES = ["CT", "T"]
 
         self.allowed_T = [x for x in range(self.T_min, self.T_max + 1) if x % 4 == 0]
+
+        # Mouse normalization scale (approximate std of yaw/pitch deltas)
+        # При инференсе нужно умножить предсказание обратно на MOUSE_SCALE
+        self.MOUSE_SCALE = 25.0
 
     # =====================================================
     def _load_metadata(self):
@@ -450,9 +454,9 @@ class CSRoundDataset(Dataset):
         intent_keys_hist = []
 
         for k in range(self.actions_window):
-            end = i - k * T
+            end = i - (k + 1) * T  # Сдвиг на 1 окно назад, чтобы не включать текущее окно (таргет)
             start = max(0, end - T + 1)
-            if start > end:
+            if end < 0:
                 break
 
             keys_window = set()
@@ -468,7 +472,8 @@ class CSRoundDataset(Dataset):
 
                 keys_window.update(st["keys"])
 
-            mouse_intent = mouse_end - mouse_start
+            # Normalize mouse history same as target
+            mouse_intent = (mouse_end - mouse_start) / self.MOUSE_SCALE
 
             window_intent = {}
 
@@ -496,8 +501,13 @@ class CSRoundDataset(Dataset):
             intent_keys_hist.append(torch.tensor(list(window_intent.values()), dtype=torch.float32))
             intent_mouse_hist.append(torch.tensor(mouse_intent, dtype=torch.float32))
 
+        # Паддинг нулями если истории не хватает (особенно в начале раунда)
+        num_intent_keys = 20  # Количество клавиш в intent
         while len(intent_keys_hist) < self.actions_window:
-            intent_keys_hist.append(torch.zeros_like(intent_keys_hist[0]))
+            if len(intent_keys_hist) > 0:
+                intent_keys_hist.append(torch.zeros_like(intent_keys_hist[0]))
+            else:
+                intent_keys_hist.append(torch.zeros(num_intent_keys, dtype=torch.float32))
         while len(intent_mouse_hist) < self.actions_window:
             intent_mouse_hist.append(torch.zeros(2, dtype=torch.float32))
 
@@ -537,7 +547,7 @@ class CSRoundDataset(Dataset):
         intent_vec = torch.tensor(list(intent.values()), dtype=torch.float32)
 
         # =====================================================
-        # 8. TARGET: DELTA YAW / PITCH OVER WINDOW T
+        # 8. TARGET: DELTA YAW / PITCH OVER WINDOW T (NORMALIZED)
         # =====================================================
         yaw_now = states[i]["mouse"][0]
         pitch_now = states[i]["mouse"][1]
@@ -545,8 +555,11 @@ class CSRoundDataset(Dataset):
         yaw_prev = states[t_start]["mouse"][0]
         pitch_prev = states[t_start]["mouse"][1]
 
+        # Normalize by MOUSE_SCALE to bring values to ~[-1, 1] range
+        # При инференсе: prediction * MOUSE_SCALE = actual delta
         target_mouse = torch.tensor(
-            [yaw_now - yaw_prev, pitch_now - pitch_prev],
+            [(yaw_now - yaw_prev) / self.MOUSE_SCALE,
+             (pitch_now - pitch_prev) / self.MOUSE_SCALE],
             dtype=torch.float32
         )
 

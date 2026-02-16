@@ -258,9 +258,9 @@ class CSRoundDataset(Dataset):
         intent_keys_hist = []
 
         for k in range(self.actions_window):
-            end = i - k * T
+            end = i - (k + 1) * T  # Сдвиг на 1 окно назад, чтобы не включать текущее окно (таргет)
             start = max(0, end - T + 1)
-            if start > end:
+            if end < 0:
                 break
 
             # объединяем нажатия мыши и клавиш в окне T
@@ -312,9 +312,13 @@ class CSRoundDataset(Dataset):
             intent_keys_hist.append(torch.tensor(list(window_intent.values()), dtype=torch.float32))
             intent_mouse_hist.append(torch.tensor(mouse_intent, dtype=torch.float32))
 
-        # дополняем нулями, если истории меньше actions_window
+        # дополняем нулями, если истории меньше actions_window (особенно в начале раунда)
+        num_intent_keys = 20  # Количество клавиш в intent
         while len(intent_keys_hist) < self.actions_window:
-            intent_keys_hist.append(torch.zeros_like(intent_keys_hist[0]))
+            if len(intent_keys_hist) > 0:
+                intent_keys_hist.append(torch.zeros_like(intent_keys_hist[0]))
+            else:
+                intent_keys_hist.append(torch.zeros(num_intent_keys, dtype=torch.float32))
         while len(intent_mouse_hist) < self.actions_window:
             intent_mouse_hist.append(torch.zeros(2, dtype=torch.float32))
 

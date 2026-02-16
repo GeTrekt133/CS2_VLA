@@ -9,6 +9,7 @@ New input: audio_seq (B, 60, 256) - 30 sec window with 0.5 sec step
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import math
 from typing import Optional, Tuple
 
@@ -42,6 +43,128 @@ class CrossAttentionBlock(nn.Module):
         return x
 
 
+class FlowActionHead(nn.Module):
+    """
+    Flow Matching Action Head for mouse delta prediction.
+
+    Instead of direct regression (MSE), learns a velocity field that
+    transforms noise into the target action. Handles multimodal action
+    distributions (e.g., player can turn left OR right).
+
+    Args:
+        context_dim: dimension of context embedding from transformer
+        action_dim: dimension of action output (2 for yaw/pitch)
+        hidden_dim: hidden layer size
+        noise_scale: scale of initial noise (smaller = less aggressive flow)
+        num_steps: Euler integration steps during inference
+    """
+
+    def __init__(
+        self,
+        context_dim: int = 512,
+        action_dim: int = 2,
+        hidden_dim: int = 256,
+        noise_scale: float = 0.3,
+        num_steps: int = 5
+    ):
+        super().__init__()
+        self.noise_scale = noise_scale
+        self.action_dim = action_dim
+        self.num_steps = num_steps
+
+        # Time embedding via sinusoidal + MLP
+        self.time_embed = nn.Sequential(
+            nn.Linear(1, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
+
+        # Main velocity prediction network
+        input_dim = context_dim + action_dim + hidden_dim
+        self.net = nn.Sequential(
+            nn.LayerNorm(input_dim),
+            nn.Linear(input_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, action_dim)
+        )
+
+    def forward(self, context: torch.Tensor, noised_action: torch.Tensor, time_step: torch.Tensor) -> torch.Tensor:
+        """
+        Predict velocity field v_θ(a_τ, τ, context).
+
+        Args:
+            context: (B, context_dim) - conditioning from transformer
+            noised_action: (B, action_dim) - interpolated noisy action
+            time_step: (B, 1) - τ ∈ [0, 1]
+
+        Returns:
+            velocity: (B, action_dim)
+        """
+        t_emb = self.time_embed(time_step)
+        x = torch.cat([context, noised_action, t_emb], dim=-1)
+        return self.net(x)
+
+    def compute_loss(self, context: torch.Tensor, gt_action: torch.Tensor) -> torch.Tensor:
+        """
+        Flow matching training loss.
+
+        Samples random τ and noise, computes MSE between predicted
+        and target velocity vectors.
+
+        Args:
+            context: (B, context_dim)
+            gt_action: (B, action_dim)
+
+        Returns:
+            loss: scalar
+        """
+        B = context.shape[0]
+        device = context.device
+
+        tau = torch.rand(B, 1, device=device)
+        eps = torch.randn(B, self.action_dim, device=device) * self.noise_scale
+
+        # Interpolate between noise and target
+        a_tau = (1 - tau) * eps + tau * gt_action
+
+        # Target velocity: direction from noise to target
+        v_target = gt_action - eps
+
+        # Predicted velocity
+        v_pred = self.forward(context, a_tau, tau)
+
+        return F.mse_loss(v_pred, v_target)
+
+    @torch.no_grad()
+    def sample(self, context: torch.Tensor, num_steps: Optional[int] = None) -> torch.Tensor:
+        """
+        Generate action via Euler integration of learned velocity field.
+
+        Args:
+            context: (B, context_dim)
+            num_steps: override default integration steps
+
+        Returns:
+            action: (B, action_dim)
+        """
+        K = num_steps or self.num_steps
+        B = context.shape[0]
+        device = context.device
+
+        # Start from scaled noise
+        a = torch.randn(B, self.action_dim, device=device) * self.noise_scale
+
+        # Euler integration
+        for k in range(K):
+            tau = torch.full((B, 1), k / K, device=device)
+            v = self.forward(context, a, tau)
+            a = a + v / K
+
+        return a
+
+
 class TemporalCrossTransformer(nn.Module):
     """
     Temporal Cross-Attention Transformer for CS2 AI Agent.
@@ -55,7 +178,7 @@ class TemporalCrossTransformer(nn.Module):
         - state_vec: (B, 95) - game state
 
     Outputs:
-        - policy_mouse: (B, 2) - yaw/pitch delta
+        - mouse_embed: (B, d_model) - context for FlowActionHead
         - policy_keys: (B, 20) - key probabilities
         - value: (B, 1) - value estimate
     """
@@ -135,12 +258,7 @@ class TemporalCrossTransformer(nn.Module):
         self.cross_attn = CrossAttentionBlock(d_model, num_heads=num_heads, ff_mult=ff_mult, dropout=dropout)
 
         # === Output heads ===
-        self.policy_mouse_head = nn.Sequential(
-            nn.LayerNorm(d_model),
-            nn.Linear(d_model, 256),
-            nn.GELU(),
-            nn.Linear(256, 2)  # yaw, pitch delta
-        )
+        # NOTE: policy_mouse_head removed — use FlowActionHead externally
         self.policy_keys_head = nn.Sequential(
             nn.LayerNorm(d_model),
             nn.Linear(d_model, 256),
@@ -175,7 +293,7 @@ class TemporalCrossTransformer(nn.Module):
             audio_seq: (B, 60, 256) or None
 
         Returns:
-            policy_mouse: (B, 2)
+            mouse_embed: (B, d_model) - context for FlowActionHead
             policy_keys: (B, 20)
             value: (B, 1)
         """
@@ -223,11 +341,11 @@ class TemporalCrossTransformer(nn.Module):
         value_embed = fused_tokens[:, 2, :]
 
         # === Forward through heads ===
-        policy_mouse = self.policy_mouse_head(policy_mouse_embed).view(B, 2)
+        # mouse_embed is passed to FlowActionHead externally
         policy_keys = self.policy_keys_head(policy_keys_embed).view(B, 20)
         value = self.value_head(value_embed)
 
-        return policy_mouse, policy_keys, value
+        return policy_mouse_embed, policy_keys, value
 
 
 class TemporalCrossTransformerNoAudio(TemporalCrossTransformer):
@@ -256,35 +374,48 @@ if __name__ == "__main__":
     # Test with audio
     print("\n=== Testing TemporalCrossTransformer WITH audio ===")
     model = TemporalCrossTransformer(use_audio=True).to(device)
+    flow_head = FlowActionHead(context_dim=512, noise_scale=0.3, num_steps=5).to(device)
+
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Trainable parameters: {total_params:,}")
+    flow_params = sum(p.numel() for p in flow_head.parameters() if p.requires_grad)
+    print(f"Transformer parameters: {total_params:,}")
+    print(f"FlowActionHead parameters: {flow_params:,}")
 
     # Create test inputs
     B = 2
     radar_seq = torch.randn(B, 129, 512).to(device)
     scene_seq = torch.randn(B, 16, 2048).to(device)
-    audio_seq = torch.randn(B, 60, 256).to(device)  # NEW
+    audio_seq = torch.randn(B, 60, 256).to(device)
     detection_seq = torch.randn(B, 1, 100).to(device)
     action_seq = torch.randn(B, 16, 22).to(device)
     state_vec = torch.randn(B, 95).to(device)
+    gt_mouse = torch.randn(B, 2).to(device)
 
-    policy_mouse, policy_keys, value = model(
+    mouse_embed, policy_keys, value = model(
         radar_seq, scene_seq, detection_seq, action_seq, state_vec, audio_seq
     )
 
-    print(f"policy_mouse: {policy_mouse.shape}")  # (B, 2)
-    print(f"policy_keys: {policy_keys.shape}")    # (B, 20)
-    print(f"value: {value.shape}")                # (B, 1)
+    print(f"mouse_embed: {mouse_embed.shape}")    # (B, 512)
+    print(f"policy_keys: {policy_keys.shape}")     # (B, 20)
+    print(f"value: {value.shape}")                 # (B, 1)
+
+    # Test flow matching training loss
+    loss = flow_head.compute_loss(mouse_embed, gt_mouse)
+    print(f"Flow matching loss: {loss.item():.4f}")
+
+    # Test flow matching inference
+    sampled_action = flow_head.sample(mouse_embed)
+    print(f"Sampled action: {sampled_action.shape}")  # (B, 2)
 
     # Test without audio (backward compatible)
     print("\n=== Testing TemporalCrossTransformer WITHOUT audio ===")
     model_no_audio = TemporalCrossTransformerNoAudio().to(device)
 
-    policy_mouse, policy_keys, value = model_no_audio(
+    mouse_embed, policy_keys, value = model_no_audio(
         radar_seq, scene_seq, detection_seq, action_seq, state_vec
     )
 
-    print(f"policy_mouse: {policy_mouse.shape}")
+    print(f"mouse_embed: {mouse_embed.shape}")
     print(f"policy_keys: {policy_keys.shape}")
     print(f"value: {value.shape}")
 

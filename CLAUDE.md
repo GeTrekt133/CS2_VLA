@@ -83,3 +83,5 @@ python src/Train.py
 - YOLO backbone заморожен, обучается только `yolo.embeds`
 - При загрузке чекпоинтов используется `strict=False`
 - Датасет требует JSON с путями к демо и состояниями
+
+Запуск python осуществляется командой - `C:/Users/misas/AppData/Local/Programs/Python/Python313/python.exe`

@@ -1,0 +1,28 @@
+# CS2 VLA Agent Inference Pipeline - Dependencies
+
+# Core ML
+torch>=2.0.0
+torchvision
+torchaudio
+
+# Numerical
+numpy
+
+# Image processing
+opencv-python
+
+# Screen capture
+mss
+
+# Audio capture (optional, for audio encoder)
+sounddevice
+soundfile
+
+# Buy prediction (optional)
+lightgbm
+
+# Global hotkey support
+keyboard
+
+# Note: No pydirectinput - using ctypes SendInput for better game compatibility
+# Note: Tkinter is included with Python (no pip install needed)

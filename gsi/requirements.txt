@@ -1,0 +1,5 @@
+# GSI module dependencies
+mss>=9.0.0           # Screen capture
+opencv-python>=4.8.0 # Image processing
+numpy>=1.24.0        # Arrays
+torch>=2.0.0         # For inference (optional for collection-only)
