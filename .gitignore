@@ -23,4 +23,6 @@ detect/screenshots/
 detect/comparison_output/
 *lgb
 *json
+detect/test_output/
+detect/viz*
 nul
