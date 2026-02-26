@@ -39,12 +39,12 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from pathlib import Path
-from torch.utils.data import DataLoader, RandomSampler
+from torch.utils.data import DataLoader, ConcatDataset, WeightedRandomSampler
 from torch.amp import autocast, GradScaler
 from tqdm import tqdm
 import yaml
 
-from dataset_yolo import SyntheticYOLODataset, collate_fn
+from dataset_yolo import SyntheticYOLODataset, RealYOLODataset, collate_fn
 
 from ultralytics.utils.loss import v8DetectionLoss
 from torchvision.ops import box_iou, batched_nms
@@ -53,6 +53,11 @@ from torchvision.ops import box_iou, batched_nms
 # ============================================================================
 # Architecture (YOLO11n — identical backbone/head to DetectionModel in Yolo.py)
 # ============================================================================
+
+def make_divisible(x, divisor=8):
+    """Returns nearest int divisible by divisor."""
+    return math.ceil(x / divisor) * divisor
+
 
 def autopad(k, p=None, d=1):
     if d > 1:
@@ -298,13 +303,22 @@ class Detect(nn.Module):
         return dist2bbox(bboxes, anchors, xywh=xywh and not self.end2end and not self.xyxy, dim=1)
 
 
-class YOLO11n(nn.Module):
-    """YOLO11n detection-only (no embed branch). Backbone+head identical to DetectionModel."""
+class YOLO11(nn.Module):
+    """YOLO11 detection-only. Supports n/s/m/l/x via scale parameter."""
 
-    def __init__(self, cfg='yolo11n.yaml', ch=3, nc=2):
+    def __init__(self, cfg='yolo11.yaml', ch=3, nc=2, scale='n'):
         super().__init__()
         with open(cfg, 'r', encoding='utf-8') as f:
             self.yaml = yaml.safe_load(f)
+
+        # Apply scale from scales dict (official ultralytics format)
+        if 'scales' in self.yaml and scale in self.yaml['scales']:
+            gd, gw, max_ch = self.yaml['scales'][scale]
+            self.yaml['depth_mult'] = gd
+            self.yaml['width_mult'] = gw
+            self.yaml['max_channels'] = max_ch
+        self.scale = scale
+
         self.model, self.save = self.parse_model(self.yaml, ch=[ch], nc=nc)
 
     def parse_model(self, d, ch, nc):
@@ -317,11 +331,12 @@ class YOLO11n(nn.Module):
 
         gd = d.get('depth_mult', 0.5)
         gw = d.get('width_mult', 0.25)
+        max_ch = d.get('max_channels', 1024)
 
         for i, (f, n, m, args) in enumerate(all_layers):
             m = eval(m) if isinstance(m, str) else m
             args = [x for x in args]
-            n = max(round(n * gd), 1) if n > 1 else n
+            n_ = n = max(round(n * gd), 1) if n > 1 else n
 
             if isinstance(f, int):
                 c1 = ch[f] if f != -1 else ch[-1]
@@ -331,20 +346,22 @@ class YOLO11n(nn.Module):
                 c1 = ch[-1]
 
             if m.__name__ in ("Conv", "C2f", "C3", "C3k2", "SPPF", "C2PSA"):
-                c2 = int(args[0] * gw)
-                if m.__name__ == "C3k2":
-                    if len(args) == 3:
-                        args = [c1, c2, 1, args[1], args[2]]
-                    else:
-                        args = [c1, c2, 1, args[1]]
-                else:
-                    args = [c1, c2, *args[1:]]
+                c2 = make_divisible(min(args[0], max_ch) * gw, 8)
+                args = [c1, c2, *args[1:]]
+                # For modules with internal repeats, pass n as 3rd arg (official ultralytics pattern)
+                if m.__name__ in ("C3k2", "C2PSA", "C2f", "C3"):
+                    args.insert(2, n)
+                    n = n_ = 1  # prevent external Sequential wrapping
+                # For M/L/X scales: force c3k=True in all C3k2 (official ultralytics behavior)
+                if m.__name__ == "C3k2" and self.scale in "mlx":
+                    args[3] = True
             elif m.__name__ == "Upsample":
+                c2 = ch[f]
                 scale = args[1] if len(args) > 1 and args[1] is not None else 2
                 mode = args[2] if len(args) > 2 else "nearest"
                 args = {"scale_factor": scale, "mode": mode}
             elif m.__name__ in ("Concat",):
-                c2 = sum(ch[j] if isinstance(ch[j], int) else ch[j][0] for j in f)
+                c2 = sum(ch[j] for j in f)
                 args = [1]
             elif m.__name__ in ("Detect",):
                 args = [nc, [ch[x] for x in f]]
@@ -352,58 +369,35 @@ class YOLO11n(nn.Module):
             else:
                 c2 = c1
 
-            if n > 1 and m.__name__ not in ("Detect", "Concat"):
-                block = nn.Sequential(*[m(*args) for _ in range(n)])
+            if n_ > 1 and m.__name__ not in ("Detect", "Concat"):
+                block = nn.Sequential(*[m(*args) for _ in range(n_)])
             elif m.__name__ == "Upsample":
                 block = m(**args)
             else:
                 block = m(*args)
 
             block.f = f
+            block.i = i
             layers.append(block)
+
+            # After first layer, reset ch so ch[i] = layer i output (official ultralytics pattern)
+            if i == 0:
+                ch = []
             ch.append(c2 if c2 is not None else ch[-1])
+
             if isinstance(f, list) and len(f) > 1:
-                save.extend(x for x in f if x != -1)
+                save.extend(x % i for x in f if x != -1)
 
         return nn.ModuleList(layers), sorted(save)
 
     def forward(self, x):
-        # Backbone (layers 0-10)
-        x = self.model[0](x)
-        x = self.model[1](x)
-        x = self.model[2](x)
-        x = self.model[3](x)
-        x4 = self.model[4](x)
-        x = self.model[5](x4)
-        x6 = self.model[6](x)
-        x = self.model[7](x6)
-        x = self.model[8](x)
-        x = self.model[9](x)
-        x10 = self.model[10](x)
-
-        # Head (layers 11-23)
-        x = self.model[11](x10)
-        x = torch.cat((x, x6), dim=1)
-        x = self.model[13](x)
-        x13 = x
-
-        x = self.model[14](x13)
-        x = torch.cat((x, x4), dim=1)
-        x = self.model[16](x)
-        x16 = x
-
-        x = self.model[17](x)
-        x = torch.cat((x, x13), dim=1)
-        x = self.model[19](x)
-        x19 = x
-
-        x = self.model[20](x)
-        x = torch.cat((x, x10), dim=1)
-        x = self.model[22](x)
-        x22 = x
-
-        # Detect (layer 23)
-        return self.model[23]([x16, x19, x22])
+        y = []  # outputs cache
+        for m in self.model:
+            if m.f != -1:
+                x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]
+            x = m(x)
+            y.append(x if m.i in self.save else None)
+        return x
 
 
 # ============================================================================
@@ -628,12 +622,14 @@ def evaluate_real_images(model, real_images_dir, device, writer, epoch,
     if not images:
         return {}
 
-    CLASS_NAMES = {0: 'body', 1: 'head'}
+    if nc == 1:
+        CLASS_NAMES = {0: 'body'}
+    else:
+        CLASS_NAMES = {0: 'body', 1: 'head'}
     CLASS_COLORS = {0: (0, 255, 0), 1: (0, 0, 255)}
 
     total_det = 0
-    body_count = 0
-    head_count = 0
+    per_class_count = {c: 0 for c in range(nc)}
     all_confs = []
     images_with_det = 0
     vis_images = []
@@ -644,9 +640,10 @@ def evaluate_real_images(model, real_images_dir, device, writer, epoch,
             continue
         orig = img.copy()
 
-        # Preprocess: direct resize to 640x640 (matches training)
+        # Preprocess: direct resize to 640x640 + BGR→RGB (matches training)
         resized = cv2.resize(img, (img_size, img_size))
-        tensor = torch.from_numpy(resized).permute(2, 0, 1).float() / 255.0
+        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+        tensor = torch.from_numpy(rgb).permute(2, 0, 1).float() / 255.0
         input_batch = tensor.unsqueeze(0).to(device)
 
         output = model(input_batch)
@@ -667,8 +664,8 @@ def evaluate_real_images(model, real_images_dir, device, writer, epoch,
 
             n_det = len(bx)
             total_det += n_det
-            body_count += (cl == 0).sum().item()
-            head_count += (cl == 1).sum().item()
+            for c_id in range(nc):
+                per_class_count[c_id] += (cl == c_id).sum().item()
             all_confs.extend(sc.cpu().tolist())
             if n_det > 0:
                 images_with_det += 1
@@ -702,8 +699,9 @@ def evaluate_real_images(model, real_images_dir, device, writer, epoch,
 
     # Log scalars to TensorBoard
     writer.add_scalar('real/total_detections', total_det, epoch)
-    writer.add_scalar('real/body_count', body_count, epoch)
-    writer.add_scalar('real/head_count', head_count, epoch)
+    for c_id in range(nc):
+        writer.add_scalar(f'real/{CLASS_NAMES.get(c_id, c_id)}_count',
+                          per_class_count[c_id], epoch)
     writer.add_scalar('real/det_per_image', total_det / max(n_images, 1), epoch)
     writer.add_scalar('real/images_with_det_pct', images_with_det / max(n_images, 1) * 100, epoch)
     writer.add_scalar('real/mean_conf', mean_conf, epoch)
@@ -711,7 +709,6 @@ def evaluate_real_images(model, real_images_dir, device, writer, epoch,
 
     # Log sample images as grid to TensorBoard
     if vis_images:
-        # Stack into [N, 3, H, W] tensor
         vis_tensor = torch.stack([
             torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
             for img in vis_images
@@ -720,14 +717,16 @@ def evaluate_real_images(model, real_images_dir, device, writer, epoch,
 
     result = {
         'real_total': total_det,
-        'real_body': body_count,
-        'real_head': head_count,
         'real_det_per_img': total_det / max(n_images, 1),
         'real_det_pct': images_with_det / max(n_images, 1) * 100,
         'real_mean_conf': mean_conf,
     }
+    for c_id in range(nc):
+        result[f'real_{CLASS_NAMES.get(c_id, c_id)}'] = per_class_count[c_id]
 
-    print(f'  Real   {n_images} imgs: {total_det} det ({body_count} body, {head_count} head), '
+    cls_str = ', '.join(f'{per_class_count[c]} {CLASS_NAMES.get(c, c)}'
+                        for c in range(nc))
+    print(f'  Real   {n_images} imgs: {total_det} det ({cls_str}), '
           f'{images_with_det}/{n_images} with det, '
           f'mean_conf={mean_conf:.3f}, max_conf={max_conf:.3f}')
 
@@ -806,15 +805,32 @@ def train_one_epoch(model, loader, loss_fn, optimizer, scaler, device,
 def main():
     p = argparse.ArgumentParser(description='YOLO11n Training — CS2 Body/Head Detection')
 
-    # Data
-    p.add_argument('--backgrounds', required=True, help='Directory with empty map screenshots')
-    p.add_argument('--rgba-crops', required=True, help='Directory with RGBA crops + metadata.json')
+    # Data sources
+    p.add_argument('--backgrounds', required=True,
+                   help='Directory with empty map screenshots (for synth-bg source)')
+    p.add_argument('--empty-frames', default=None,
+                   help='Directory with empty game frames 640x640 (for synth-ef source)')
+    p.add_argument('--rgba-crops', required=True,
+                   help='Directory with RGBA crops + metadata.json')
+    p.add_argument('--real-data', default=None,
+                   help='Path to real YOLO dataset (train/valid/test with images/labels)')
+
+    # Sampling weights for 3 sources: real, synth-bg, synth-ef
+    p.add_argument('--w-real', type=float, default=0.3,
+                   help='Sampling weight for real labeled data')
+    p.add_argument('--w-synth-bg', type=float, default=0.5,
+                   help='Sampling weight for synthetic on map backgrounds')
+    p.add_argument('--w-synth-ef', type=float, default=0.2,
+                   help='Sampling weight for synthetic on empty game frames')
 
     # Model
-    p.add_argument('--yaml', required=True, help='Path to yolo11n.yaml')
-    p.add_argument('--pretrained', default=None, help='Pretrained weights (yolo11n.pt)')
+    p.add_argument('--yaml', default='yolo11.yaml',
+                   help='Path to yolo11.yaml (official ultralytics format with scales)')
+    p.add_argument('--scale', default='l', choices=['n', 's', 'm', 'l', 'x'],
+                   help='Model scale: n/s/m/l/x (default: l)')
+    p.add_argument('--pretrained', default=None, help='Pretrained weights (.pt)')
     p.add_argument('--resume', default=None, help='Resume training from checkpoint')
-    p.add_argument('--nc', type=int, default=2, help='Number of classes')
+    p.add_argument('--nc', type=int, default=1, help='Number of classes (default 1 = body)')
 
     # Training hyperparameters
     p.add_argument('--epochs', type=int, default=300)
@@ -825,14 +841,22 @@ def main():
     p.add_argument('--img-size', type=int, default=640)
     p.add_argument('--workers', type=int, default=8)
     p.add_argument('--epoch-size', type=int, default=0,
-                   help='Virtual epoch size, 0 = number of backgrounds')
+                   help='Virtual epoch size, 0 = auto')
 
     # Synthetic dataset params
     p.add_argument('--min-players', type=int, default=1)
     p.add_argument('--max-players', type=int, default=5)
     p.add_argument('--negative-ratio', type=float, default=0.15)
-    p.add_argument('--flash-prob', type=float, default=0.15)
-    p.add_argument('--occlusion-prob', type=float, default=0.0)
+    p.add_argument('--flash-prob', type=float, default=0.08)
+    p.add_argument('--occlusion-prob', type=float, default=0.10)
+    p.add_argument('--blood-prob', type=float, default=0.15,
+                   help='Probability of blood/damage screen effect')
+    p.add_argument('--muzzle-flash-prob', type=float, default=0.08,
+                   help='Probability of muzzle flash near a player')
+    p.add_argument('--cover-prob', type=float, default=0.15,
+                   help='Probability of bottom cover occlusion (legs hidden)')
+    p.add_argument('--head-peek-prob', type=float, default=0.10,
+                   help='Probability of pasting only head (peeking from cover)')
     p.add_argument('--scale-min', type=float, default=0.5)
     p.add_argument('--scale-max', type=float, default=2.5)
     p.add_argument('--demo-positions', default=None,
@@ -848,14 +872,12 @@ def main():
     # Evaluation
     p.add_argument('--val-interval', type=int, default=5,
                    help='Compute mAP every N epochs')
-    p.add_argument('--val-ratio', type=float, default=0.2,
-                   help='Fraction of backgrounds held out for validation')
     p.add_argument('--real-images', default=None,
                    help='Directory with real screenshots for validation (no GT labels)')
 
     # Output
     p.add_argument('--output', default='./runs', help='Root output directory')
-    p.add_argument('--name', default='yolo11n_body_head', help='Run name')
+    p.add_argument('--name', default='yolo11l_body', help='Run name')
 
     # Misc
     p.add_argument('--no-amp', action='store_true', help='Disable mixed precision')
@@ -876,12 +898,16 @@ def main():
     from torch.utils.tensorboard import SummaryWriter
     writer = SummaryWriter(str(run_dir / 'tb_logs'))
 
-    CLASS_NAMES = {0: 'body', 1: 'head'}
+    if args.nc == 1:
+        CLASS_NAMES = {0: 'body'}
+    else:
+        CLASS_NAMES = {0: 'body', 1: 'head'}
 
     print('=' * 60)
-    print('YOLO11n Training — CS2 Body/Head Detection')
+    print(f'YOLO11{args.scale} Training — CS2 Detection (nc={args.nc})')
     print('=' * 60)
     print(f'  Device:       {device}')
+    print(f'  Scale:        {args.scale}')
     print(f'  Classes:      {args.nc} ({", ".join(CLASS_NAMES.values())})')
     print(f'  Epochs:       {args.epochs}')
     print(f'  Batch size:   {args.batch_size}')
@@ -893,67 +919,179 @@ def main():
     print(f'  Output:       {run_dir}')
     print('=' * 60)
 
-    # ==== Datasets (separate instances for proper train/val split) ====
+    # ==== Datasets (3 sources) ====
     print('\nLoading datasets...')
-    train_ds = SyntheticYOLODataset(
-        backgrounds_dir=args.backgrounds,
+
+    synth_common = dict(
         rgba_crops_dir=args.rgba_crops,
         img_size=args.img_size,
-        augment=True,
         min_players=args.min_players,
         max_players=args.max_players,
-        negative_ratio=args.negative_ratio,
         flash_prob=args.flash_prob,
         occlusion_prob=args.occlusion_prob,
-        scale_range=(args.scale_min, args.scale_max),
-        demo_positions_path=args.demo_positions,
-        demo_position_prob=args.demo_position_prob,
-    )
-    val_ds = SyntheticYOLODataset(
-        backgrounds_dir=args.backgrounds,
-        rgba_crops_dir=args.rgba_crops,
-        img_size=args.img_size,
-        augment=False,
-        min_players=args.min_players,
-        max_players=args.max_players,
-        negative_ratio=0.0,
+        blood_prob=args.blood_prob,
+        muzzle_flash_prob=args.muzzle_flash_prob,
+        cover_prob=args.cover_prob,
+        head_peek_prob=args.head_peek_prob,
         scale_range=(args.scale_min, args.scale_max),
         demo_positions_path=args.demo_positions,
         demo_position_prob=args.demo_position_prob,
     )
 
-    # Split backgrounds 80/20
-    all_bgs = train_ds.background_paths[:]
+    # --- Source 1: Synthetic on map backgrounds (D:\backgrounds) ---
+    synth_bg_train = SyntheticYOLODataset(
+        backgrounds_dir=args.backgrounds, augment=True,
+        negative_ratio=args.negative_ratio, **synth_common,
+    )
+    synth_bg_val = SyntheticYOLODataset(
+        backgrounds_dir=args.backgrounds, augment=False,
+        negative_ratio=0.0, **synth_common,
+    )
+    # Split backgrounds 90/10
+    all_bgs = synth_bg_train.background_paths[:]
     random.shuffle(all_bgs)
-    split = int((1 - args.val_ratio) * len(all_bgs))
-    train_ds.background_paths = all_bgs[:split]
-    val_ds.background_paths = all_bgs[split:]
+    bg_split = int(0.9 * len(all_bgs))
+    synth_bg_train.background_paths = all_bgs[:bg_split]
+    synth_bg_val.background_paths = all_bgs[bg_split:]
+    print(f'  [synth-bg]  train={len(synth_bg_train)}  val={len(synth_bg_val)}')
 
-    print(f'  Train backgrounds: {len(train_ds)}')
-    print(f'  Val backgrounds:   {len(val_ds)}')
+    # --- Source 2: Synthetic on empty game frames (D:\empty_frames_640) ---
+    synth_ef_train = None
+    synth_ef_val = None
+    if args.empty_frames and Path(args.empty_frames).exists():
+        synth_ef_train = SyntheticYOLODataset(
+            backgrounds_dir=args.empty_frames, augment=True,
+            negative_ratio=args.negative_ratio, **synth_common,
+        )
+        synth_ef_val = SyntheticYOLODataset(
+            backgrounds_dir=args.empty_frames, augment=False,
+            negative_ratio=0.0, **synth_common,
+        )
+        # Split empty frames 90/10
+        all_ef = synth_ef_train.background_paths[:]
+        random.shuffle(all_ef)
+        ef_split = int(0.9 * len(all_ef))
+        synth_ef_train.background_paths = all_ef[:ef_split]
+        synth_ef_val.background_paths = all_ef[ef_split:]
+        print(f'  [synth-ef]  train={len(synth_ef_train)}  val={len(synth_ef_val)}')
 
-    # DataLoaders
-    epoch_size = args.epoch_size if args.epoch_size > 0 else len(train_ds)
-    if args.epoch_size > 0:
-        sampler = RandomSampler(train_ds, replacement=True, num_samples=epoch_size)
-        train_loader = DataLoader(train_ds, batch_size=args.batch_size, sampler=sampler,
-                                  collate_fn=collate_fn, num_workers=args.workers,
-                                  pin_memory=True, persistent_workers=args.workers > 0)
+    # --- Source 3: Real labeled data ---
+    real_train = None
+    real_val = None
+    if args.real_data:
+        real_dir = Path(args.real_data)
+        train_dir = real_dir / 'train'
+        valid_dir = real_dir / 'valid'
+        if (train_dir / 'images').exists():
+            real_train = RealYOLODataset(
+                data_dir=str(train_dir), img_size=args.img_size,
+                augment=True, flash_prob=args.flash_prob,
+            )
+            print(f'  [real]      train={len(real_train)}')
+        if (valid_dir / 'images').exists():
+            real_val = RealYOLODataset(
+                data_dir=str(valid_dir), img_size=args.img_size,
+                augment=False,
+            )
+            print(f'  [real]      val={len(real_val)}')
+
+    # --- Collate with class filtering for nc=1 ---
+    if args.nc == 1:
+        _base_collate = collate_fn
+        def collate_filter(batch):
+            result = _base_collate(batch)
+            if result['targets'].numel() > 0:
+                # Keep only body (class 0), drop head (class 1) bboxes
+                mask = result['targets'][:, 1] == 0
+                result['targets'] = result['targets'][mask]
+            return result
+        active_collate = collate_filter
     else:
-        train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
-                                  collate_fn=collate_fn, num_workers=args.workers,
-                                  pin_memory=True, persistent_workers=args.workers > 0)
+        active_collate = collate_fn
 
+    # --- Build train ConcatDataset with weighted sampling ---
+    datasets_train = []
+    weights_per_sample = []
+    source_names = []
+
+    # Always have synth-bg
+    n_bg = len(synth_bg_train)
+    datasets_train.append(synth_bg_train)
+    w_bg = args.w_synth_bg
+    source_names.append(f'synth-bg({n_bg})')
+
+    # synth-ef (optional)
+    if synth_ef_train is not None:
+        n_ef = len(synth_ef_train)
+        datasets_train.append(synth_ef_train)
+        w_ef = args.w_synth_ef
+        source_names.append(f'synth-ef({n_ef})')
+    else:
+        n_ef = 0
+        w_ef = 0
+        # Redistribute: synth-bg gets synth-ef's weight
+        w_bg += args.w_synth_ef
+
+    # real (optional)
+    if real_train is not None:
+        n_real = len(real_train)
+        datasets_train.append(real_train)
+        w_real = args.w_real
+        source_names.append(f'real({n_real})')
+    else:
+        n_real = 0
+        w_real = 0
+        # Redistribute evenly between synth sources
+        if synth_ef_train is not None:
+            w_bg += args.w_real / 2
+            w_ef += args.w_real / 2
+        else:
+            w_bg += args.w_real
+
+    # Per-sample weights
+    weights_per_sample.extend([w_bg / n_bg] * n_bg)
+    if n_ef > 0:
+        weights_per_sample.extend([w_ef / n_ef] * n_ef)
+    if n_real > 0:
+        weights_per_sample.extend([w_real / n_real] * n_real)
+
+    train_ds = ConcatDataset(datasets_train)
+    total_train = len(train_ds)
+    epoch_size = args.epoch_size if args.epoch_size > 0 else total_train
+
+    sampler = WeightedRandomSampler(weights_per_sample, num_samples=epoch_size,
+                                    replacement=True)
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, sampler=sampler,
+                              collate_fn=active_collate, num_workers=args.workers,
+                              pin_memory=True, persistent_workers=args.workers > 0)
+
+    print(f'\n  Train mix: {" + ".join(source_names)} = {total_train} total')
+    if n_real > 0:
+        print(f'  Weights: real={w_real:.0%}  synth-bg={w_bg:.0%}  synth-ef={w_ef:.0%}')
+
+    # --- Validation: ConcatDataset from all available val sources ---
+    val_datasets = [synth_bg_val]
+    val_names = [f'synth-bg({len(synth_bg_val)})']
+    if synth_ef_val is not None:
+        val_datasets.append(synth_ef_val)
+        val_names.append(f'synth-ef({len(synth_ef_val)})')
+    if real_val is not None:
+        val_datasets.append(real_val)
+        val_names.append(f'real({len(real_val)})')
+
+    val_ds = ConcatDataset(val_datasets)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
-                            collate_fn=collate_fn, num_workers=args.workers,
+                            collate_fn=active_collate, num_workers=args.workers,
                             pin_memory=True, persistent_workers=args.workers > 0)
 
+    print(f'  Val mix:   {" + ".join(val_names)} = {len(val_ds)} total')
+
     steps_per_epoch = len(train_loader)
-    print(f'  Epoch size:        {epoch_size} ({steps_per_epoch} steps)')
+    print(f'  Epoch size: {epoch_size} ({steps_per_epoch} steps)')
 
     # ==== Model ====
-    print('\nBuilding YOLO11n...')
-    model = YOLO11n(cfg=args.yaml, nc=args.nc).to(device)
+    print(f'\nBuilding YOLO11-{args.scale}...')
+    model = YOLO11(cfg=args.yaml, nc=args.nc, scale=args.scale).to(device)
 
     if args.pretrained and Path(args.pretrained).exists():
         load_pretrained_weights(model, args.pretrained)

@@ -202,29 +202,46 @@ class UniversalDemoParser:
         ticks_df_target = ticks_df[ticks_df['steamid'] == self.target_steam_id]
 
         # Parse events for offline RL
-        kills_df = parser.parse_event('player_death', player=['weapon', 'steamid'], other=['steamid', 'headshot'])
-        damages_df = parser.parse_event('player_hurt', player=['health', 'armor'], other=['weapon', 'dmg_health', 'hitgroup'])
+        # NOTE: demoparser2 v0.39+ returns columns directly (attacker_steamid,
+        # user_steamid, weapon, headshot, etc.) — do NOT use player=/other= params
+        kills_df = parser.parse_event('player_death')
+        # player_death columns: attacker_steamid, user_steamid (victim), weapon, headshot, ...
+        damages_df = parser.parse_event('player_hurt')
+        # player_hurt columns: attacker_steamid, user_steamid (victim), weapon, dmg_health, hitgroup, ...
 
         # Additional events for dense rewards
-        weapon_fire_df = parser.parse_event('weapon_fire', player=['weapon'])
-        player_blind_df = parser.parse_event('player_blind', other=['blind_duration'])
+        weapon_fire_df = parser.parse_event('weapon_fire')
+        # weapon_fire columns: user_steamid, weapon, ...
+        player_blind_df = parser.parse_event('player_blind')
+        # player_blind columns: user_steamid (blinded), attacker_steamid (flasher), blind_duration, ...
 
-        # Grenade events
-        grenade_thrown_df = parser.parse_event('grenade_thrown', player=['weapon'])
-        flashbang_detonate_df = parser.parse_event('flashbang_detonate')
-        hegrenade_detonate_df = parser.parse_event('hegrenade_detonate')
-        smokegrenade_detonate_df = parser.parse_event('smokegrenade_detonate')
-        molotov_detonate_df = parser.parse_event('molotov_detonate')
+        # Grenade events (some may not exist in every demo — return empty DF)
+        def _safe_parse_event(event_name):
+            try:
+                result = parser.parse_event(event_name)
+                if isinstance(result, pd.DataFrame):
+                    return result
+                return pd.DataFrame()
+            except Exception:
+                return pd.DataFrame()
+
+        grenade_thrown_df = _safe_parse_event('grenade_thrown')
+        flashbang_detonate_df = _safe_parse_event('flashbang_detonate')
+        hegrenade_detonate_df = _safe_parse_event('hegrenade_detonate')
+        smokegrenade_detonate_df = _safe_parse_event('smokegrenade_detonate')
+        molotov_detonate_df = _safe_parse_event('inferno_startburn')  # molotov_detonate doesn't exist
 
         # Bomb defuse attempts
-        bomb_begindefuse_df = parser.parse_event('bomb_begindefuse')
-        bomb_abortdefuse_df = parser.parse_event('bomb_abortdefuse')
+        bomb_begindefuse_df = _safe_parse_event('bomb_begindefuse')
+        bomb_abortdefuse_df = _safe_parse_event('bomb_abortdefuse')
 
-        # Item purchases (for economic management)
-        item_purchase_df = parser.parse_event('item_purchase', player=['weapon'])
+        # Item purchases
+        item_purchase_df = _safe_parse_event('item_purchase')
+        # item_purchase columns: steamid (not user_steamid!), item_name, ...
 
-        # Weapon reloads (for tactical awareness)
-        weapon_reload_df = parser.parse_event('weapon_reload', player=['weapon'])
+        # Weapon reloads
+        weapon_reload_df = _safe_parse_event('weapon_reload')
+        # weapon_reload columns: user_steamid (no weapon column!)
 
         # Parse round events
         bomb_planted_ticks = list(parser.parse_event('bomb_planted')['tick'])
@@ -481,48 +498,50 @@ class UniversalDemoParser:
         events = []
 
         # Kills/Deaths
+        # player_death: user_steamid=victim, attacker_steamid=killer
         round_kills = kills_df[(kills_df['tick'] >= start_tick) & (kills_df['tick'] <= end_tick)]
         for _, kill in round_kills.iterrows():
-            if kill['user_steamid'] == self.target_steam_id:
+            if kill['attacker_steamid'] == self.target_steam_id:
                 # Player killed someone
                 events.append({
                     'type': 'kill',
                     'tick': int(kill['tick']),
-                    'victim_id': int(kill['other_steamid']),
-                    'weapon': kill['user_weapon'],
-                    'headshot': bool(kill['other_headshot']) if 'other_headshot' in kill else False
+                    'victim_id': int(kill['user_steamid']),
+                    'weapon': str(kill['weapon']),
+                    'headshot': bool(kill['headshot'])
                 })
-            elif kill['other_steamid'] == self.target_steam_id:
+            elif kill['user_steamid'] == self.target_steam_id:
                 # Player died
                 events.append({
                     'type': 'death',
                     'tick': int(kill['tick']),
-                    'killer_id': int(kill['user_steamid']),
-                    'weapon': kill['user_weapon']
+                    'killer_id': int(kill['attacker_steamid']),
+                    'weapon': str(kill['weapon'])
                 })
 
         # Damage dealt/taken
+        # player_hurt: user_steamid=victim, attacker_steamid=attacker
         round_damages = damages_df[(damages_df['tick'] >= start_tick) & (damages_df['tick'] <= end_tick)]
         for _, dmg in round_damages.iterrows():
-            if dmg['user_steamid'] == self.target_steam_id:
+            if dmg['attacker_steamid'] == self.target_steam_id:
                 # Player dealt damage
                 events.append({
                     'type': 'damage_dealt',
                     'tick': int(dmg['tick']),
-                    'victim_id': int(dmg['other_steamid']),
-                    'damage': int(dmg['other_dmg_health']),
-                    'hitgroup': str(dmg['other_hitgroup']),
-                    'weapon': str(dmg['other_weapon']) if 'other_weapon' in dmg else 'unknown'
+                    'victim_id': int(dmg['user_steamid']),
+                    'damage': int(dmg['dmg_health']),
+                    'hitgroup': str(dmg['hitgroup']),
+                    'weapon': str(dmg['weapon'])
                 })
-            elif dmg['other_steamid'] == self.target_steam_id:
+            elif dmg['user_steamid'] == self.target_steam_id:
                 # Player took damage
                 events.append({
                     'type': 'damage_taken',
                     'tick': int(dmg['tick']),
-                    'attacker_id': int(dmg['user_steamid']),
-                    'damage': int(dmg['other_dmg_health']),
-                    'hitgroup': str(dmg['other_hitgroup']),
-                    'weapon': str(dmg['other_weapon']) if 'other_weapon' in dmg else 'unknown'
+                    'attacker_id': int(dmg['attacker_steamid']),
+                    'damage': int(dmg['dmg_health']),
+                    'hitgroup': str(dmg['hitgroup']),
+                    'weapon': str(dmg['weapon'])
                 })
 
         # Weapon fire (for accuracy tracking)
@@ -532,102 +551,119 @@ class UniversalDemoParser:
             events.append({
                 'type': 'weapon_fire',
                 'tick': int(fire['tick']),
-                'weapon': str(fire['user_weapon'])
+                'weapon': str(fire['weapon'])
             })
 
         # Player blinded (flashbang hit)
+        # player_blind: user_steamid=blinded player, attacker_steamid=flasher
         round_blind = player_blind_df[(player_blind_df['tick'] >= start_tick) & (player_blind_df['tick'] <= end_tick)]
-        round_blind = round_blind[round_blind['other_steamid'] == self.target_steam_id]
-        for _, blind in round_blind.iterrows():
-            events.append({
-                'type': 'player_blind',
-                'tick': int(blind['tick']),
-                'attacker_id': int(blind['user_steamid']),
-                'blind_duration': float(blind['other_blind_duration']) if 'other_blind_duration' in blind else 0.0
-            })
+        if 'user_steamid' in player_blind_df.columns:
+            round_blind = round_blind[round_blind['user_steamid'] == self.target_steam_id]
+            for _, blind in round_blind.iterrows():
+                events.append({
+                    'type': 'player_blind',
+                    'tick': int(blind['tick']),
+                    'attacker_id': int(blind['attacker_steamid']),
+                    'blind_duration': float(blind['blind_duration'])
+                })
 
         # Grenade thrown (utility usage)
-        round_grenades = grenade_thrown_df[(grenade_thrown_df['tick'] >= start_tick) & (grenade_thrown_df['tick'] <= end_tick)]
-        round_grenades = round_grenades[round_grenades['user_steamid'] == self.target_steam_id]
-        for _, nade in round_grenades.iterrows():
-            events.append({
-                'type': 'grenade_thrown',
-                'tick': int(nade['tick']),
-                'grenade_type': str(nade['user_weapon'])
-            })
+        # Note: grenade_thrown may not exist in all demos
+        if not grenade_thrown_df.empty and 'user_steamid' in grenade_thrown_df.columns:
+            round_grenades = grenade_thrown_df[(grenade_thrown_df['tick'] >= start_tick) & (grenade_thrown_df['tick'] <= end_tick)]
+            round_grenades = round_grenades[round_grenades['user_steamid'] == self.target_steam_id]
+            weapon_col = 'weapon' if 'weapon' in grenade_thrown_df.columns else None
+            for _, nade in round_grenades.iterrows():
+                events.append({
+                    'type': 'grenade_thrown',
+                    'tick': int(nade['tick']),
+                    'grenade_type': str(nade[weapon_col]) if weapon_col else 'unknown'
+                })
 
         # Flashbang detonate (successful flash = reward)
-        round_flash_det = flashbang_detonate_df[(flashbang_detonate_df['tick'] >= start_tick) & (flashbang_detonate_df['tick'] <= end_tick)]
-        round_flash_det = round_flash_det[round_flash_det['user_steamid'] == self.target_steam_id]
-        for _, flash in round_flash_det.iterrows():
-            events.append({
-                'type': 'flashbang_detonate',
-                'tick': int(flash['tick'])
-            })
+        if not flashbang_detonate_df.empty and 'user_steamid' in flashbang_detonate_df.columns:
+            round_flash_det = flashbang_detonate_df[(flashbang_detonate_df['tick'] >= start_tick) & (flashbang_detonate_df['tick'] <= end_tick)]
+            round_flash_det = round_flash_det[round_flash_det['user_steamid'] == self.target_steam_id]
+            for _, flash in round_flash_det.iterrows():
+                events.append({
+                    'type': 'flashbang_detonate',
+                    'tick': int(flash['tick'])
+                })
 
         # HE grenade detonate
-        round_he_det = hegrenade_detonate_df[(hegrenade_detonate_df['tick'] >= start_tick) & (hegrenade_detonate_df['tick'] <= end_tick)]
-        round_he_det = round_he_det[round_he_det['user_steamid'] == self.target_steam_id]
-        for _, he in round_he_det.iterrows():
-            events.append({
-                'type': 'hegrenade_detonate',
-                'tick': int(he['tick'])
-            })
+        if not hegrenade_detonate_df.empty and 'user_steamid' in hegrenade_detonate_df.columns:
+            round_he_det = hegrenade_detonate_df[(hegrenade_detonate_df['tick'] >= start_tick) & (hegrenade_detonate_df['tick'] <= end_tick)]
+            round_he_det = round_he_det[round_he_det['user_steamid'] == self.target_steam_id]
+            for _, he in round_he_det.iterrows():
+                events.append({
+                    'type': 'hegrenade_detonate',
+                    'tick': int(he['tick'])
+                })
 
         # Smoke grenade detonate
-        round_smoke_det = smokegrenade_detonate_df[(smokegrenade_detonate_df['tick'] >= start_tick) & (smokegrenade_detonate_df['tick'] <= end_tick)]
-        round_smoke_det = round_smoke_det[round_smoke_det['user_steamid'] == self.target_steam_id]
-        for _, smoke in round_smoke_det.iterrows():
-            events.append({
-                'type': 'smokegrenade_detonate',
-                'tick': int(smoke['tick'])
-            })
+        if not smokegrenade_detonate_df.empty and 'user_steamid' in smokegrenade_detonate_df.columns:
+            round_smoke_det = smokegrenade_detonate_df[(smokegrenade_detonate_df['tick'] >= start_tick) & (smokegrenade_detonate_df['tick'] <= end_tick)]
+            round_smoke_det = round_smoke_det[round_smoke_det['user_steamid'] == self.target_steam_id]
+            for _, smoke in round_smoke_det.iterrows():
+                events.append({
+                    'type': 'smokegrenade_detonate',
+                    'tick': int(smoke['tick'])
+                })
 
-        # Molotov detonate
-        round_molotov_det = molotov_detonate_df[(molotov_detonate_df['tick'] >= start_tick) & (molotov_detonate_df['tick'] <= end_tick)]
-        round_molotov_det = round_molotov_det[round_molotov_det['user_steamid'] == self.target_steam_id]
-        for _, molotov in round_molotov_det.iterrows():
-            events.append({
-                'type': 'molotov_detonate',
-                'tick': int(molotov['tick'])
-            })
+        # Molotov/incendiary detonate (inferno_startburn in CS2)
+        if not molotov_detonate_df.empty and 'user_steamid' in molotov_detonate_df.columns:
+            round_molotov_det = molotov_detonate_df[(molotov_detonate_df['tick'] >= start_tick) & (molotov_detonate_df['tick'] <= end_tick)]
+            round_molotov_det = round_molotov_det[round_molotov_det['user_steamid'] == self.target_steam_id]
+            for _, molotov in round_molotov_det.iterrows():
+                events.append({
+                    'type': 'molotov_detonate',
+                    'tick': int(molotov['tick'])
+                })
 
         # Bomb defuse attempts
-        round_begindefuse = bomb_begindefuse_df[(bomb_begindefuse_df['tick'] >= start_tick) & (bomb_begindefuse_df['tick'] <= end_tick)]
-        round_begindefuse = round_begindefuse[round_begindefuse['user_steamid'] == self.target_steam_id]
-        for _, defuse in round_begindefuse.iterrows():
-            events.append({
-                'type': 'bomb_begindefuse',
-                'tick': int(defuse['tick'])
-            })
+        if not bomb_begindefuse_df.empty and 'user_steamid' in bomb_begindefuse_df.columns:
+            round_begindefuse = bomb_begindefuse_df[(bomb_begindefuse_df['tick'] >= start_tick) & (bomb_begindefuse_df['tick'] <= end_tick)]
+            round_begindefuse = round_begindefuse[round_begindefuse['user_steamid'] == self.target_steam_id]
+            for _, defuse in round_begindefuse.iterrows():
+                events.append({
+                    'type': 'bomb_begindefuse',
+                    'tick': int(defuse['tick'])
+                })
 
-        round_abortdefuse = bomb_abortdefuse_df[(bomb_abortdefuse_df['tick'] >= start_tick) & (bomb_abortdefuse_df['tick'] <= end_tick)]
-        round_abortdefuse = round_abortdefuse[round_abortdefuse['user_steamid'] == self.target_steam_id]
-        for _, defuse in round_abortdefuse.iterrows():
-            events.append({
-                'type': 'bomb_abortdefuse',
-                'tick': int(defuse['tick'])
-            })
+        if not bomb_abortdefuse_df.empty and 'user_steamid' in bomb_abortdefuse_df.columns:
+            round_abortdefuse = bomb_abortdefuse_df[(bomb_abortdefuse_df['tick'] >= start_tick) & (bomb_abortdefuse_df['tick'] <= end_tick)]
+            round_abortdefuse = round_abortdefuse[round_abortdefuse['user_steamid'] == self.target_steam_id]
+            for _, defuse in round_abortdefuse.iterrows():
+                events.append({
+                    'type': 'bomb_abortdefuse',
+                    'tick': int(defuse['tick'])
+                })
 
         # Item purchases (economic management)
-        round_purchases = item_purchase_df[(item_purchase_df['tick'] >= start_tick) & (item_purchase_df['tick'] <= end_tick)]
-        round_purchases = round_purchases[round_purchases['user_steamid'] == self.target_steam_id]
-        for _, purchase in round_purchases.iterrows():
-            events.append({
-                'type': 'item_purchase',
-                'tick': int(purchase['tick']),
-                'item': str(purchase['user_weapon'])
-            })
+        # item_purchase uses 'steamid' (not 'user_steamid') and 'item_name' (not 'weapon')
+        if not item_purchase_df.empty:
+            steamid_col = 'steamid' if 'steamid' in item_purchase_df.columns else 'user_steamid'
+            if steamid_col in item_purchase_df.columns:
+                round_purchases = item_purchase_df[(item_purchase_df['tick'] >= start_tick) & (item_purchase_df['tick'] <= end_tick)]
+                round_purchases = round_purchases[round_purchases[steamid_col] == self.target_steam_id]
+                item_col = 'item_name' if 'item_name' in item_purchase_df.columns else 'weapon'
+                for _, purchase in round_purchases.iterrows():
+                    events.append({
+                        'type': 'item_purchase',
+                        'tick': int(purchase['tick']),
+                        'item': str(purchase[item_col]) if item_col in purchase.index else 'unknown'
+                    })
 
         # Weapon reloads (tactical awareness)
-        round_reloads = weapon_reload_df[(weapon_reload_df['tick'] >= start_tick) & (weapon_reload_df['tick'] <= end_tick)]
-        round_reloads = round_reloads[round_reloads['user_steamid'] == self.target_steam_id]
-        for _, reload in round_reloads.iterrows():
-            events.append({
-                'type': 'weapon_reload',
-                'tick': int(reload['tick']),
-                'weapon': str(reload['user_weapon'])
-            })
+        # weapon_reload has user_steamid but NO weapon column
+        if not weapon_reload_df.empty and 'user_steamid' in weapon_reload_df.columns:
+            round_reloads = weapon_reload_df[(weapon_reload_df['tick'] >= start_tick) & (weapon_reload_df['tick'] <= end_tick)]
+            round_reloads = round_reloads[round_reloads['user_steamid'] == self.target_steam_id]
+            for _, reload in round_reloads.iterrows():
+                events.append({
+                    'type': 'weapon_reload',
+                    'tick': int(reload['tick']),
+                })
 
         # Bomb events
         for bt in bomb_planted_ticks:

@@ -706,6 +706,155 @@ def extract_coco_rgba_crops(
     print(f"  Output: {out_path}")
 
 
+class RealYOLODataset(Dataset):
+    """
+    Dataset for real labeled images in YOLO format (images/ + labels/).
+
+    Transforms match SyntheticYOLODataset: resize to img_size x img_size (stretch),
+    basic color/blur augmentations, horizontal flip.
+
+    Returns same dict format as SyntheticYOLODataset for ConcatDataset compatibility.
+    """
+
+    def __init__(
+        self,
+        data_dir: str,
+        img_size: int = 640,
+        augment: bool = True,
+        flash_prob: float = 0.15,
+    ):
+        self.img_size = img_size
+        self.augment = augment
+        self.flash_prob = flash_prob
+
+        data_path = Path(data_dir)
+        self.images_dir = data_path / 'images'
+        self.labels_dir = data_path / 'labels'
+
+        self.image_paths = sorted(
+            list(self.images_dir.glob('*.jpg')) +
+            list(self.images_dir.glob('*.png'))
+        )
+
+        if len(self.image_paths) == 0:
+            raise ValueError(f"No images found in {self.images_dir}")
+
+        print(f"RealYOLODataset: {len(self.image_paths)} images from {data_path}")
+        self.transform = self._get_transforms()
+
+    def _get_transforms(self):
+        if not self.augment:
+            return A.Compose([
+                A.Resize(self.img_size, self.img_size),
+                A.Normalize(mean=[0.0, 0.0, 0.0], std=[1.0, 1.0, 1.0]),
+                ToTensorV2()
+            ], bbox_params=A.BboxParams(
+                format='yolo', label_fields=['class_labels'], min_visibility=0.3))
+
+        return A.Compose([
+            A.Resize(self.img_size, self.img_size),
+            A.HorizontalFlip(p=0.5),
+            A.OneOf([
+                A.RandomBrightnessContrast(
+                    brightness_limit=0.3, contrast_limit=0.3, p=1.0),
+                A.RandomGamma(gamma_limit=(80, 120), p=1.0),
+            ], p=0.5),
+            A.OneOf([
+                A.MotionBlur(blur_limit=3, p=1.0),
+                A.GaussianBlur(blur_limit=3, p=1.0),
+            ], p=0.2),
+            A.Normalize(mean=[0.0, 0.0, 0.0], std=[1.0, 1.0, 1.0]),
+            ToTensorV2()
+        ], bbox_params=A.BboxParams(
+            format='yolo', label_fields=['class_labels'], min_visibility=0.3))
+
+    def __len__(self) -> int:
+        return len(self.image_paths)
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        img_path = self.image_paths[idx]
+        label_path = self.labels_dir / f"{img_path.stem}.txt"
+
+        image = cv2.imread(str(img_path))
+        if image is None:
+            image = np.zeros((self.img_size, self.img_size, 3), dtype=np.uint8)
+        else:
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        # Parse YOLO labels
+        bboxes = []
+        class_labels = []
+        if label_path.exists():
+            with open(label_path, 'r') as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) != 5:
+                        continue
+                    cls_id = int(parts[0])
+                    xc, yc, bw, bh = map(float, parts[1:])
+                    if bw > 0.001 and bh > 0.001:
+                        # Clamp to [0, 1] (fixes annotation precision errors)
+                        x1 = max(0.0, xc - bw / 2)
+                        y1 = max(0.0, yc - bh / 2)
+                        x2 = min(1.0, xc + bw / 2)
+                        y2 = min(1.0, yc + bh / 2)
+                        bw_c = x2 - x1
+                        bh_c = y2 - y1
+                        if bw_c > 0.001 and bh_c > 0.001:
+                            bboxes.append([(x1 + x2) / 2, (y1 + y2) / 2, bw_c, bh_c])
+                            class_labels.append(cls_id)
+
+        # Flash augmentation (before albumentations)
+        if self.augment and self.flash_prob > 0 and random.random() < self.flash_prob:
+            h, w = image.shape[:2]
+            y, x = np.ogrid[:h, :w]
+            cx = random.randint(int(w * 0.3), int(w * 0.7))
+            cy = random.randint(int(h * 0.3), int(h * 0.7))
+            dist = np.sqrt((x - cx) ** 2 + (y - cy) ** 2)
+            max_d = np.sqrt(cx ** 2 + cy ** 2)
+            mask = np.clip(1 - dist / max_d, 0, 1)
+            intensity = random.uniform(0.75, 1.0)
+            mask = mask ** 0.8 * intensity
+            white = np.ones_like(image) * 255
+            image = np.clip(
+                image * (1 - mask[..., None]) + white * mask[..., None],
+                0, 255
+            ).astype(np.uint8)
+
+        # Dummy bbox for albumentations
+        is_dummy = len(bboxes) == 0
+        if is_dummy:
+            bboxes_in = [[0.5, 0.5, 0.01, 0.01]]
+            labels_in = [0]
+        else:
+            bboxes_in = bboxes
+            labels_in = class_labels
+
+        transformed = self.transform(
+            image=image, bboxes=bboxes_in, class_labels=labels_in)
+
+        image = transformed['image']
+        out_bboxes = transformed['bboxes']
+        out_labels = transformed['class_labels']
+
+        if is_dummy:
+            out_bboxes = []
+            out_labels = []
+
+        if len(out_bboxes) == 0:
+            bboxes_tensor = torch.zeros((0, 4), dtype=torch.float32)
+            labels_tensor = torch.zeros((0,), dtype=torch.long)
+        else:
+            bboxes_tensor = torch.tensor(out_bboxes, dtype=torch.float32)
+            labels_tensor = torch.tensor(out_labels, dtype=torch.long)
+
+        return {
+            'image': image,
+            'bboxes': bboxes_tensor,
+            'class_labels': labels_tensor,
+        }
+
+
 class SyntheticYOLODataset(Dataset):
     """
     Синтетический датасет: пустые фоны карт + cutout кропов игроков.
@@ -731,6 +880,10 @@ class SyntheticYOLODataset(Dataset):
         negative_ratio: float = 0.15,
         flash_prob: float = 0.15,
         occlusion_prob: float = 0.0,
+        blood_prob: float = 0.12,
+        muzzle_flash_prob: float = 0.10,
+        cover_prob: float = 0.15,
+        head_peek_prob: float = 0.08,
         scale_range: Tuple[float, float] = (0.5, 2.5),
         aspect_ratio_range: Tuple[float, float] = (0.75, 1.3),
         blending_mode: str = 'mixed',
@@ -747,8 +900,12 @@ class SyntheticYOLODataset(Dataset):
             min_players: минимум игроков (если не negative sample)
             max_players: максимум игроков на изображении
             negative_ratio: доля пустых изображений (без игроков)
-            flash_prob: вероятность флэш-эффекта
-            occlusion_prob: вероятность частичного перекрытия
+            flash_prob: вероятность флэш-эффекта (слеповая граната)
+            occlusion_prob: вероятность частичного перекрытия балками
+            blood_prob: вероятность эффекта получения урона (красный экран)
+            muzzle_flash_prob: вероятность вспышки от выстрела рядом с игроком
+            cover_prob: вероятность перекрытия ног укрытием (стена/ящик)
+            head_peek_prob: вероятность вставки только головы (пикающий из-за укрытия)
             scale_range: диапазон масштабирования высоты кропа (min, max)
             aspect_ratio_range: рандом множитель ширины относительно высоты (min, max)
             blending_mode: метод вставки кропов ('poisson', 'feather', 'mixed')
@@ -763,6 +920,10 @@ class SyntheticYOLODataset(Dataset):
         self.negative_ratio = negative_ratio
         self.flash_prob = flash_prob
         self.occlusion_prob = occlusion_prob
+        self.blood_prob = blood_prob
+        self.muzzle_flash_prob = muzzle_flash_prob
+        self.cover_prob = cover_prob
+        self.head_peek_prob = head_peek_prob
         self.scale_range = scale_range
         self.aspect_ratio_range = aspect_ratio_range
         self.blending_mode = blending_mode
@@ -777,11 +938,12 @@ class SyntheticYOLODataset(Dataset):
         else:
             self.demo_positions = None
 
-        # Загружаем пути к фонам
+        # Загружаем пути к фонам (только каждый 3-й = реальный FOV)
         bg_path = Path(backgrounds_dir)
-        self.background_paths = sorted(
+        all_bgs = sorted(
             list(bg_path.glob('*.jpg')) + list(bg_path.glob('*.png')) + list(bg_path.glob('*.jpeg'))
         )
+        self.background_paths = [p for i, p in enumerate(all_bgs) if i % 3 == 0]
         if len(self.background_paths) == 0:
             raise ValueError(f"No backgrounds found in {backgrounds_dir}")
 
@@ -811,8 +973,14 @@ class SyntheticYOLODataset(Dataset):
                 raise ValueError(f"No RGBA crops loaded from {rgba_crops_dir}")
 
             paired = sum(1 for _, bbs in self.rgba_crops if len(bbs) > 1)
+            # Индексы кропов с головой — для head_peek аугментации
+            self.head_crop_indices = [
+                i for i, (_, bbs) in enumerate(self.rgba_crops)
+                if any(bb['class_id'] == 1 for bb in bbs)
+            ]
             print(f"Loaded {len(self.background_paths)} backgrounds, "
-                  f"{len(self.rgba_crops)} player crops ({paired} with head)")
+                  f"{len(self.rgba_crops)} player crops ({paired} with head, "
+                  f"{len(self.head_crop_indices)} usable for head_peek)")
         else:
             # Fallback: старый формат RGB кропов (single class)
             self.use_rgba = False
@@ -884,6 +1052,180 @@ class SyntheticYOLODataset(Dataset):
         union_area = area1 + area2 - inter_area
 
         return inter_area / (union_area + 1e-6)
+
+    def _apply_blood_screen(self, image: np.ndarray) -> np.ndarray:
+        """Эффект получения урона — экран краснеет.
+
+        Два варианта (50/50):
+        1. Общий красный тинт по всему экрану (лёгкий урон)
+        2. Радиальное красное пятно с одной стороны (направленный урон)
+        """
+        h, w = image.shape[:2]
+        result = image.astype(np.float32)
+
+        if random.random() < 0.5:
+            # Вариант 1: общий тинт — красный оверлей
+            alpha = random.uniform(0.15, 0.40)
+            red_layer = np.zeros_like(image, dtype=np.float32)
+            red_layer[:, :, 0] = 220  # R
+            red_layer[:, :, 1] = random.randint(10, 40)   # G (немного)
+            red_layer[:, :, 2] = random.randint(10, 30)    # B
+
+            # Виньетка — сильнее по краям (как в CS2)
+            y, x = np.ogrid[:h, :w]
+            cx, cy = w / 2, h / 2
+            dist = np.sqrt((x - cx)**2 + (y - cy)**2)
+            max_d = np.sqrt(cx**2 + cy**2)
+            vignette = np.clip(dist / max_d, 0, 1) ** 0.6  # сильнее к краям
+            vignette = vignette * 0.7 + 0.3  # min 0.3, max 1.0
+
+            alpha_map = (alpha * vignette)[..., None]
+            result = result * (1 - alpha_map) + red_layer * alpha_map
+        else:
+            # Вариант 2: направленное красное пятно (удар с одной стороны)
+            side = random.choice(['left', 'right', 'top', 'bottom'])
+            if side == 'left':
+                cx = random.randint(0, int(w * 0.2))
+                cy = random.randint(int(h * 0.2), int(h * 0.8))
+            elif side == 'right':
+                cx = random.randint(int(w * 0.8), w)
+                cy = random.randint(int(h * 0.2), int(h * 0.8))
+            elif side == 'top':
+                cx = random.randint(int(w * 0.2), int(w * 0.8))
+                cy = random.randint(0, int(h * 0.2))
+            else:
+                cx = random.randint(int(w * 0.2), int(w * 0.8))
+                cy = random.randint(int(h * 0.8), h)
+
+            y, x = np.ogrid[:h, :w]
+            dist = np.sqrt((x - cx)**2 + (y - cy)**2)
+            radius = random.uniform(0.3, 0.6) * max(h, w)
+            mask = np.clip(1 - dist / radius, 0, 1) ** 1.5
+
+            intensity = random.uniform(0.25, 0.55)
+            mask = mask * intensity
+
+            red_spot = np.zeros_like(image, dtype=np.float32)
+            red_spot[:, :, 0] = random.randint(180, 240)
+            red_spot[:, :, 1] = random.randint(0, 30)
+            red_spot[:, :, 2] = random.randint(0, 20)
+
+            result = result * (1 - mask[..., None]) + red_spot * mask[..., None]
+
+        return np.clip(result, 0, 255).astype(np.uint8)
+
+    def _apply_muzzle_flash(self, image: np.ndarray,
+                            bboxes: List[List[float]]) -> np.ndarray:
+        """Вспышка от выстрела вблизи одного из игроков.
+
+        Маленькая яркая вспышка (жёлто-белая) рядом с bbox — имитирует
+        момент когда в игрока стреляют или он стреляет в камеру.
+        """
+        if not bboxes:
+            return image
+
+        h, w = image.shape[:2]
+
+        # Выбираем случайный bbox
+        bbox = random.choice(bboxes)
+        bx, by, bw, bh = bbox
+
+        # Центр вспышки — рядом с bbox (чуть сбоку или сверху)
+        offset_x = random.uniform(-bw * 0.5, bw * 0.5)
+        offset_y = random.uniform(-bh * 0.6, bh * 0.3)
+        flash_cx = int((bx + offset_x) * w)
+        flash_cy = int((by + offset_y) * h)
+        flash_cx = max(0, min(flash_cx, w - 1))
+        flash_cy = max(0, min(flash_cy, h - 1))
+
+        # Радиус вспышки (5-20% от высоты изображения)
+        radius = random.uniform(0.05, 0.20) * h
+
+        y, x = np.ogrid[:h, :w]
+        dist = np.sqrt((x - flash_cx)**2 + (y - flash_cy)**2)
+        mask = np.clip(1 - dist / radius, 0, 1) ** 1.5
+
+        intensity = random.uniform(0.6, 1.0)
+        mask = mask * intensity
+
+        # Жёлто-белая вспышка
+        flash_color = np.zeros_like(image, dtype=np.float32)
+        flash_color[:, :, 0] = 255  # R
+        flash_color[:, :, 1] = random.randint(200, 255)  # G (жёлтый тон)
+        flash_color[:, :, 2] = random.randint(120, 200)  # B
+
+        result = image.astype(np.float32)
+        result = result * (1 - mask[..., None]) + flash_color * mask[..., None]
+        return np.clip(result, 0, 255).astype(np.uint8)
+
+    def _apply_cover_occlusion(self, image: np.ndarray,
+                                bbox: List[float]) -> np.ndarray:
+        """Перекрытие нижней части bbox укрытием (стена, ящик, перила).
+
+        Имитирует ситуацию когда игрок виден из-за укрытия —
+        ноги скрыты, видна только верхняя часть тела.
+        Bbox НЕ обрезается — модель должна предсказать full body.
+        """
+        h, w = image.shape[:2]
+        bx, by, bw, bh = bbox
+
+        # Абсолютные координаты bbox
+        x1 = int((bx - bw / 2) * w)
+        y1 = int((by - bh / 2) * h)
+        x2 = int((bx + bw / 2) * w)
+        y2 = int((by + bh / 2) * h)
+        bbox_h = y2 - y1
+        bbox_w = x2 - x1
+
+        if bbox_h < 20 or bbox_w < 10:
+            return image
+
+        # Перекрываем 20-60% нижней части
+        cover_ratio = random.uniform(0.2, 0.6)
+        cover_top = y2 - int(bbox_h * cover_ratio)
+
+        # Небольшой padding за пределы bbox
+        pad_x = random.randint(3, max(4, int(bbox_w * 0.15)))
+        pad_y = random.randint(2, max(3, int(bbox_h * 0.05)))
+        cover_x1 = max(0, x1 - pad_x)
+        cover_x2 = min(w, x2 + pad_x)
+
+        # Перекрытие только внутри bbox (+ маленький padding вниз)
+        cover_y2 = min(h, y2 + pad_y)
+
+        # Палитра CS2 укрытий
+        palettes = [
+            (80, 85, 90),    # серый бетон
+            (100, 95, 85),   # светлый бетон
+            (60, 55, 50),    # тёмная стена
+            (90, 70, 50),    # коричневый ящик
+            (70, 80, 60),    # зеленоватый металл
+            (50, 50, 55),    # тёмный металл
+            (110, 100, 85),  # песчаник
+        ]
+        base_r, base_g, base_b = random.choice(palettes)
+
+        # Рисуем укрытие с текстурой (не идеально плоское)
+        cover_region = image[cover_top:cover_y2, cover_x1:cover_x2].copy()
+        noise = np.random.randint(-15, 15, cover_region.shape, dtype=np.int16)
+        flat_color = np.full_like(cover_region, [base_r, base_g, base_b],
+                                   dtype=np.int16)
+        textured = np.clip(flat_color + noise, 0, 255).astype(np.uint8)
+
+        # Верхний край — немного скошенный (не идеальная линия)
+        edge_h = max(2, int(bbox_h * 0.03))
+        if edge_h > 0 and cover_top > 0:
+            for row in range(edge_h):
+                alpha = row / edge_h
+                y_pos = row
+                if y_pos < textured.shape[0]:
+                    textured[y_pos] = (
+                        cover_region[y_pos].astype(np.float32) * (1 - alpha) +
+                        textured[y_pos].astype(np.float32) * alpha
+                    ).astype(np.uint8)
+
+        image[cover_top:cover_y2, cover_x1:cover_x2] = textured
+        return image
 
     def _apply_flash_effect(self, image: np.ndarray) -> np.ndarray:
         """Флэш-эффект (ослепление от слеповой гранаты) - агрессивная версия."""
@@ -968,9 +1310,48 @@ class SyntheticYOLODataset(Dataset):
             bx2 = max(0, min(bx2, w))
             by2 = max(0, min(by2, h))
 
-            # Цвет балки (темный, как стена/столб)
-            color = np.random.randint(20, 100, size=3).tolist()
-            cv2.rectangle(image, (bx1, by1), (bx2, by2), color, -1)
+            # Текстурированная балка (как в cover occlusion)
+            beam_h = by2 - by1
+            beam_w = bx2 - bx1
+            if beam_h <= 0 or beam_w <= 0:
+                continue
+            palettes = [
+                (80, 85, 90), (100, 95, 85), (60, 55, 50),
+                (90, 70, 50), (70, 80, 60), (50, 50, 55), (110, 100, 85),
+            ]
+            base_r, base_g, base_b = random.choice(palettes)
+            noise = np.random.randint(-15, 15,
+                                      (beam_h, beam_w, 3), dtype=np.int16)
+            flat = np.full((beam_h, beam_w, 3),
+                           [base_r, base_g, base_b], dtype=np.int16)
+            textured = np.clip(flat + noise, 0, 255).astype(np.uint8)
+
+            # Мягкие края (2px blend)
+            edge = min(2, beam_h // 2, beam_w // 2)
+            if edge > 0:
+                orig_region = image[by1:by2, bx1:bx2].copy()
+                for e in range(edge):
+                    a = (e + 1) / (edge + 1)
+                    if orientation == 'vertical':
+                        textured[:, e] = (
+                            orig_region[:, e].astype(np.float32) * (1 - a) +
+                            textured[:, e].astype(np.float32) * a
+                        ).astype(np.uint8)
+                        textured[:, -(e + 1)] = (
+                            orig_region[:, -(e + 1)].astype(np.float32) * (1 - a) +
+                            textured[:, -(e + 1)].astype(np.float32) * a
+                        ).astype(np.uint8)
+                    else:
+                        textured[e] = (
+                            orig_region[e].astype(np.float32) * (1 - a) +
+                            textured[e].astype(np.float32) * a
+                        ).astype(np.uint8)
+                        textured[-(e + 1)] = (
+                            orig_region[-(e + 1)].astype(np.float32) * (1 - a) +
+                            textured[-(e + 1)].astype(np.float32) * a
+                        ).astype(np.uint8)
+
+            image[by1:by2, bx1:bx2] = textured
 
         return image
 
@@ -1112,13 +1493,58 @@ class SyntheticYOLODataset(Dataset):
                 num_players = random.randint(self.min_players, self.max_players)
 
                 for _ in range(num_players):
-                    if self.use_rgba:
-                        # Выбираем случайного игрока (RGBA + bbox metadata)
-                        crop_rgba, crop_bboxes_info = random.choice(self.rgba_crops)
-                        crop = crop_rgba.copy()  # RGBA (H, W, 4)
-                    else:
-                        crop_bboxes_info = None
-                        crop = random.choice(self.player_crops).copy()  # RGB (H, W, 3)
+                    # --- Head peek: иногда вставляем только голову (пик из-за укрытия) ---
+                    is_head_peek = (
+                        self.use_rgba
+                        and hasattr(self, 'head_crop_indices')
+                        and len(self.head_crop_indices) > 0
+                        and random.random() < self.head_peek_prob
+                    )
+
+                    if is_head_peek:
+                        idx = random.choice(self.head_crop_indices)
+                        crop_rgba, crop_bboxes_info_full = self.rgba_crops[idx]
+
+                        # Находим head bbox в метаданных
+                        head_bb = None
+                        for bb in crop_bboxes_info_full:
+                            if bb['class_id'] == 1:
+                                head_bb = bb
+                                break
+
+                        if head_bb is not None:
+                            hx1, hy1, hx2, hy2 = head_bb['bbox']
+                            # Добавляем небольшой padding вокруг головы (шея, часть плеч)
+                            head_h = hy2 - hy1
+                            head_w = hx2 - hx1
+                            pad_x = int(head_w * 0.15)
+                            pad_y = int(head_h * 0.2)
+                            ch, cw = crop_rgba.shape[:2]
+                            hx1 = max(0, hx1 - pad_x)
+                            hy1 = max(0, hy1 - pad_y)
+                            hx2 = min(cw, hx2 + pad_x)
+                            hy2 = min(ch, hy2 + pad_y)
+
+                            crop = crop_rgba[hy1:hy2, hx1:hx2].copy()
+                            if crop.shape[0] < 8 or crop.shape[1] < 8:
+                                is_head_peek = False
+                            else:
+                                # Один bbox: вся вырезка = class 0 (body)
+                                crop_bboxes_info = [{
+                                    'class_id': 0,
+                                    'bbox': [0, 0, crop.shape[1], crop.shape[0]]
+                                }]
+                        else:
+                            is_head_peek = False
+
+                    if not is_head_peek:
+                        if self.use_rgba:
+                            # Выбираем случайного игрока (RGBA + bbox metadata)
+                            crop_rgba, crop_bboxes_info = random.choice(self.rgba_crops)
+                            crop = crop_rgba.copy()  # RGBA (H, W, 4)
+                        else:
+                            crop_bboxes_info = None
+                            crop = random.choice(self.player_crops).copy()  # RGB (H, W, 3)
 
                     orig_h, orig_w = crop.shape[:2]
 
@@ -1133,8 +1559,8 @@ class SyntheticYOLODataset(Dataset):
                             random.randint(0, len(self.demo_positions) - 1)]
                         cx_norm, cy_norm, h_norm, w_norm = dp
 
-                        # Scale from projected bbox height
-                        target_h = int(h_norm * h)
+                        # Scale from projected bbox height (+30% padding)
+                        target_h = int(h_norm * h * 1.3)
                         if target_h < 12:
                             use_demo = False
                         else:
@@ -1329,7 +1755,22 @@ class SyntheticYOLODataset(Dataset):
                 bbox = bboxes[occ_idx]
                 image = self._apply_beam_occlusion(image, bbox)
 
-        # Флэш-эффект
+        # Перекрытие ног укрытием (стена, ящик — видна только верхняя часть тела)
+        if self.augment and len(bboxes) > 0 and random.random() < self.cover_prob:
+            num_covered = min(random.randint(1, 2), len(bboxes))
+            covered_indices = random.sample(range(len(bboxes)), num_covered)
+            for cov_idx in covered_indices:
+                image = self._apply_cover_occlusion(image, bboxes[cov_idx])
+
+        # Вспышка от выстрела рядом с игроком
+        if self.augment and len(bboxes) > 0 and random.random() < self.muzzle_flash_prob:
+            image = self._apply_muzzle_flash(image, bboxes)
+
+        # Эффект получения урона (красный экран)
+        if self.augment and random.random() < self.blood_prob:
+            image = self._apply_blood_screen(image)
+
+        # Флэш-эффект (слеповая граната)
         if self.augment and random.random() < self.flash_prob:
             image = self._apply_flash_effect(image)
 

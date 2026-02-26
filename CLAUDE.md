@@ -78,6 +78,27 @@ python src/Train.py
 Сохраняются в `./checkpoints2/<run_name>/`:
 - `radar_encoder`, `yolo`, `temporal_model`, `optimizer`
 
+## Data Collection (data_collect_v2/)
+
+Автоматический сбор данных из CS2 demo-записей: кадры + аудио + game state.
+
+- **cs2_cmd.py** — прямой ввод команд в консоль CS2 через scan codes (без cfg/bind)
+- **demo_control.py** — управление воспроизведением демо (playdemo, seek, spec_player)
+- **capture.py** — захват экрана через WGC (Windows Graphics Capture)
+- **audio.py** — запись аудио через WASAPI loopback (pyaudiowpatch) + ffmpeg resample
+- **collector.py** — SingleWindowCollector: оркестрирует запись раундов
+- **run.py** — CLI entry point (`--test`, `--list-devices`, `--validate`, сбор данных)
+
+Поддержка Sandboxie (`--sandbox CS2`) для изоляции инстансов.
+
+### Multi-Instance Bot Farm (future)
+
+Для параллельного запуска 10-15 инстансов CS2 на сервере (RTX 3090 Ti, 256GB RAM):
+- **Option A**: ASTER Multiseat — изолированные seats с ViGEm input
+- **Option B**: RDP Multi-Session — concurrent RDP sessions с GPU acceleration
+- Подробности: см. memory/orchestration.md
+- ОС для фермы: Windows 10 IoT Enterprise LTSC 2021
+
 ## Important Notes
 
 - YOLO backbone заморожен, обучается только `yolo.embeds`
