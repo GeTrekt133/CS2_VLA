@@ -2,14 +2,14 @@
 Training Script — Final 50M Architecture CS2 AI Agent.
 
 Architecture:
-  RadarEncoder (EffB0 blocks 1-5): ~1.0M
-  YOLO (YOLOv11l backbone):       ~25.4M  (frozen, only embeds trainable)
-  YOLO embeds head:                ~1.6M  (trainable)
-  AudioEncoder (4-block QuartzNet):~3.5M
-  TemporalTransformer (d=384,L=4): ~19M
-  FlowActionHead:                  ~0.3M
-  ─────────────────────────────────────
-  Total: ~50.8M  |  Perception/Control: 1.66x ✅
+  RadarEncoder (EffB0 blocks 1-5):   ~1.0M
+  YOLO (YOLOv11l backbone):          ~25.4M  (frozen, only embeds trainable)
+  YOLO embeds head:                   ~1.6M  (trainable)
+  StereoAudioEncoder (MN10 mn10_as): ~4.88M  (stereo, AudioSet pretrained)
+  TemporalTransformer (d=384,L=4):   ~19M
+  FlowActionHead:                     ~0.3M
+  ──────────────────────────────────────────
+  Total: ~52.2M  |  Perception/Control: 1.72x ✅
 
 Sequence inputs (all unified to SEQ_LEN=16 tokens):
   radar_seq:     32 raw @1Hz    → linspace → (B, 16, 512)
@@ -49,7 +49,7 @@ from DatasetIntent import CSRoundDataset, SEQ_LEN, SCENE_SEQ_LEN, ACTION_SEQ_LEN
 from RadarEncoder import RadarEncoderEffB0
 from Yolo import DetectionModel, Detect, load_pretrained_weights
 from TemporalTransformer import TemporalCrossTransformer, FlowActionHead
-from AudioEncoder import AudioEncoder
+from AudioEncoder import StereoAudioEncoder
 
 # sklearn is optional for metrics
 try:
@@ -508,17 +508,23 @@ def train():
     total_yolo = sum(p.numel() for p in yolo.parameters())
     print(f'YOLO total: {total_yolo:,}  |  embeds (trainable): {embed_params:,}')
 
-    # Audio encoder
+    # Audio encoder — StereoAudioEncoder (MobileNetV3-Large, mn10_as compatible)
+    PRETRAINED_AUDIO = None   # set to path of mn10_as.pt for AudioSet pretraining
     audio_encoder = None
     if USE_AUDIO:
-        audio_encoder = AudioEncoder(embed_dim=512, target_embeddings=32).to(device)
+        audio_encoder = StereoAudioEncoder(embed_dim=512, target_embeddings=32).to(device)
         if checkpoint and 'audio_encoder' in checkpoint:
             audio_encoder.load_state_dict(checkpoint['audio_encoder'], strict=False)
-            print('AudioEncoder: loaded from checkpoint')
+            print('StereoAudioEncoder: loaded from checkpoint')
         else:
-            print('AudioEncoder: initialized from scratch')
+            # Optionally load AudioSet pretrained weights (mn10_as)
+            # Download: https://github.com/fschmid56/EfficientAT/releases/download/v0.0.1/mn10_as.pt
+            if PRETRAINED_AUDIO:
+                audio_encoder.load_pretrained_mn10as(PRETRAINED_AUDIO)
+            else:
+                print('StereoAudioEncoder: initialized from scratch (set PRETRAINED_AUDIO for mn10_as weights)')
         n_audio = sum(p.numel() for p in audio_encoder.parameters())
-        print(f'AudioEncoder params: {n_audio:,}')
+        print(f'StereoAudioEncoder params: {n_audio:,}')
 
     # Temporal model (d_model=384, SEQ_LEN=16)
     temporal_model = TemporalCrossTransformer(

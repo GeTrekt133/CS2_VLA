@@ -49,7 +49,7 @@ class CSRoundDataset(Dataset):
         scene_frame_paths: list[str] length 16
         radar_seq:       (16, 224, 224, 3) float32
         radar_frame_paths: list[str] length 16
-        audio_waveform:  (256000,) float32  or zeros if not available
+        audio_waveform:  (2, 256000) float32 stereo  or zeros if not available
         actions_mouse:   (16, 2) float32
         actions_keys:    (16, 20) float32
         state_vec:       (95,) float32
@@ -271,11 +271,15 @@ class CSRoundDataset(Dataset):
             return self._audio_cache[audio_path]
         try:
             waveform, sr = torchaudio.load(audio_path)
-            if waveform.shape[0] > 1:
-                waveform = waveform.mean(dim=0, keepdim=True)
+            # Keep stereo (2, T) — spatial audio cues (ILD, HRTF) require both channels
+            if waveform.shape[0] == 1:
+                waveform = waveform.repeat(2, 1)   # mono fallback → pseudo-stereo
+            elif waveform.shape[0] > 2:
+                waveform = waveform[:2, :]          # keep first 2 channels only
+            # waveform: (2, T)
             if sr != self.AUDIO_SAMPLE_RATE:
                 waveform = torchaudio.transforms.Resample(sr, self.AUDIO_SAMPLE_RATE)(waveform)
-            waveform = waveform.squeeze(0)
+            # waveform: (2, T_resampled)
             if len(self._audio_cache) >= self._audio_cache_max_size:
                 del self._audio_cache[next(iter(self._audio_cache))]
             self._audio_cache[audio_path] = waveform
@@ -286,7 +290,8 @@ class CSRoundDataset(Dataset):
 
     def _get_audio_window(self, audio_path: str, current_tick: int,
                           round_start_tick: int) -> torch.Tensor:
-        zeros = torch.zeros(self.AUDIO_WINDOW_SAMPLES, dtype=torch.float32)
+        # Stereo zeros: (2, AUDIO_WINDOW_SAMPLES)
+        zeros = torch.zeros(2, self.AUDIO_WINDOW_SAMPLES, dtype=torch.float32)
         if not self.use_audio:
             return zeros
 
@@ -294,20 +299,23 @@ class CSRoundDataset(Dataset):
         if waveform is None:
             return zeros
 
+        # waveform: (2, T_total)
         ticks_since_start = current_tick - round_start_tick
         time_sec = ticks_since_start / self.TICK_RATE
         current_sample = int(time_sec * self.AUDIO_SAMPLE_RATE)
 
         start_sample = max(0, current_sample - self.AUDIO_WINDOW_SAMPLES)
-        end_sample = min(current_sample, waveform.shape[0])
+        end_sample = min(current_sample, waveform.shape[1])
 
-        audio_window = waveform[start_sample:end_sample]
+        audio_window = waveform[:, start_sample:end_sample]   # (2, window)
 
-        if audio_window.shape[0] < self.AUDIO_WINDOW_SAMPLES:
-            pad = self.AUDIO_WINDOW_SAMPLES - audio_window.shape[0]
-            audio_window = torch.cat([torch.zeros(pad, dtype=torch.float32), audio_window])
+        if audio_window.shape[1] < self.AUDIO_WINDOW_SAMPLES:
+            pad = self.AUDIO_WINDOW_SAMPLES - audio_window.shape[1]
+            audio_window = torch.cat(
+                [torch.zeros(2, pad, dtype=torch.float32), audio_window], dim=1
+            )
 
-        return audio_window[:self.AUDIO_WINDOW_SAMPLES]
+        return audio_window[:, :self.AUDIO_WINDOW_SAMPLES]   # (2, AUDIO_WINDOW_SAMPLES)
 
     # ------------------------------------------------------------------ #
     # __getitem__                                                          #

@@ -199,7 +199,7 @@ class AudioRecorder:
                     [
                         self._ffmpeg,
                         "-i", self._temp_path,
-                        "-ac", "1",                     # mono
+                        "-ac", "2",                     # stereo
                         "-ar", str(self.sample_rate),    # resample
                         "-acodec", "pcm_f32le",         # float32 WAV
                         "-y",                            # overwrite
@@ -242,8 +242,8 @@ class AudioRecorder:
         except Exception:
             try:
                 size = os.path.getsize(path)
-                # float32 mono WAV: 4 bytes per sample
-                return (size - 44) / (4 * self.sample_rate)
+                # float32 stereo WAV: 4 bytes per sample × 2 channels
+                return (size - 44) / (4 * 2 * self.sample_rate)
             except Exception:
                 return 0.0
 
