@@ -333,7 +333,7 @@ class UniversalDemoParser:
             keys = extract_buttons(row['buttons'], row['is_walking'])
 
             # Infer weapon key
-            current_weapon = row['active_weapon_name'].lower() if row['active_weapon_name'] else ''
+            current_weapon = str(row['active_weapon_name']).lower() if pd.notna(row['active_weapon_name']) else ''
 
             if current_weapon != prev_weapon:
                 prev_weapon = current_weapon
