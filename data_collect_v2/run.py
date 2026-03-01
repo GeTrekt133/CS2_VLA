@@ -73,13 +73,15 @@ def run_test(args):
         demos = [f for f in os.listdir(demo_dir) if f.endswith('.dem')]
         if demos:
             demo_name = demos[0]
-            demo_stem = demo_name[:-4] if demo_name.endswith('.dem') else demo_name
+            full_demo_path = os.path.join(demo_dir, demo_name)
+            demo_stem = full_demo_path[:-4] if full_demo_path.endswith('.dem') else full_demo_path
+            demo_stem = demo_stem.replace('\\', '/')
             print(f"  Found demo: {demo_name}")
 
-            print(f"  Sending: playdemo {demo_stem}")
+            print(f'  Sending: playdemo "{demo_stem}"')
             demo_ctrl._commander.send_batch([
                 'echo ">>> LOADING DEMO <<<"',
-                f'playdemo {demo_stem}',
+                f'playdemo "{demo_stem}"',
             ])
 
             print("  Waiting 15s for demo to load...")
