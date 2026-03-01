@@ -145,9 +145,8 @@ class SingleWindowCollector:
         # 3. Setup console log reader for tick sync
         self.demo_ctrl.setup_console_log(self.config.console_log_path)
 
-        # 4. Load demo in CS2 via direct console commands
-        demo_filename = os.path.basename(demo_path)
-        self.demo_ctrl.load_demo(demo_filename, user_id)
+        # 4. Load demo in CS2 via direct console commands (full path for non-csgo dirs)
+        self.demo_ctrl.load_demo(demo_path, user_id)
 
         # 5. Parse server_start_tick for tick offset
         self.demo_ctrl.parse_server_start_tick()
@@ -275,8 +274,11 @@ class SingleWindowCollector:
                     self.saver.save(frame, new_tick, frames_dir)
                     last_saved_tick = new_tick
                     frames_saved += 1
-
-            time.sleep(poll_interval)
+                # Don't sleep if behind — catch up immediately
+                if self.tick_clock.current_tick() > last_saved_tick + self.config.tick_stride:
+                    continue
+            else:
+                time.sleep(poll_interval)
 
         # Stop audio recording before pause (capture real audio until end)
         if self.audio:

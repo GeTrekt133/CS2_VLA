@@ -112,7 +112,9 @@ class DemoController:
         self._user_id = user_id
 
         # Strip .dem extension (Source 2 accepts both, but safer without)
+        # Support full paths — CS2 needs forward slashes and quotes for paths with spaces
         stem = demo_filename[:-4] if demo_filename.endswith('.dem') else demo_filename
+        stem = stem.replace('\\', '/')
 
         # Stop any current demo for a clean state
         self._commander.send("stopdemo")
@@ -122,7 +124,7 @@ class DemoController:
         if self._console_log:
             self._console_log.mark_position()
 
-        self._commander.send(f"playdemo {stem}")
+        self._commander.send(f'playdemo "{stem}"')
 
         # Wait for "Achievements disabled: demo playing" in console.log
         if self._console_log:
