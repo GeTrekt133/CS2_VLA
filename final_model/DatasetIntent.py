@@ -44,18 +44,17 @@ class CSRoundDataset(Dataset):
     without ExactMatchBucketSampler.
 
     Output keys:
-        game_id, round_id, tick
-        scene_seq:       (16, H, W, 3) float32
-        scene_frame_paths: list[str] length 16
+        game_id, round_id, demo_path, tick
+        scene_frame_paths: list[str] length 64 (paths for Train.py to load)
         radar_seq:       (16, 224, 224, 3) float32
         radar_frame_paths: list[str] length 16
         audio_waveform:  (2, 256000) float32 stereo  or zeros if not available
-        actions_mouse:   (16, 2) float32
-        actions_keys:    (16, 20) float32
-        state_vec:       (95,) float32
+        actions_mouse:   (64, 2) float32
+        actions_keys:    (64, 20) float32
+        state_vec:       (100,) float32
         intent:          (20,) float32
-        target_mouse:    (2,) float32
-        T:               int  (intent window length in ticks)
+        target_mouse:    (2,) float32  (per-tick rate: delta / (actual_ticks * MOUSE_SCALE))
+        T:               int  (temporal stride in ticks)
     """
 
     AUDIO_SAMPLE_RATE = 16000
@@ -66,8 +65,8 @@ class CSRoundDataset(Dataset):
     def __init__(
         self,
         dataset_json: str,
-        T_min: int = 3,
-        T_max: int = 12,
+        T_min: int = 1,
+        T_max: int = 6,
         radar_window: int = 32,    # 32 raw @1Hz → linspace to 16
         scene_window: int = 64,    # 64 raw frames → linspace to 16
         actions_window: int = 64,  # 64 raw windows → linspace to 16
@@ -104,7 +103,7 @@ class CSRoundDataset(Dataset):
             "HE", "FLASH", "SMOKE", "DECOY", "C4", "SHIFT"
         ]
         self.WEAPONS = [
-            'p2000', 'p250', 'five-seven', 'glock-18', 'tec-9',
+            'p2000', 'usp-s', 'p250', 'five-seven', 'glock-18', 'tec-9',
             'cz75-auto', 'dual berettas', 'desert eagle', 'm249',
             'r8 revolver', 'mp9', 'mac-10', 'pp-bizon', 'mp7',
             'ump-45', 'p90', 'mp5-sd', 'famas', 'galil ar', 'sawed-off',
@@ -116,7 +115,7 @@ class CSRoundDataset(Dataset):
         ]
         self.SIDES = ["CT", "T"]
         self.MOUSE_SCALE = 25.0
-        self.allowed_T = [x for x in range(T_min, T_max + 1) if x % 4 == 0]
+        self.allowed_T = list(range(T_min, T_max + 1))
 
         self.metadata: List[Dict] = []
         self.samples: List[Dict] = []
@@ -334,25 +333,11 @@ class CSRoundDataset(Dataset):
         raw_scene_indices = list(range(max(0, i - (self.scene_window - 1) * T), i + 1, T))
         chosen_scene = self._linspace_indices(len(raw_scene_indices), target=SCENE_SEQ_LEN)
 
-        scene_frames = []
         scene_paths = []
-        _last_scene: Optional[np.ndarray] = None
         for k in chosen_scene:
             j = raw_scene_indices[k]
             tick = states[j]['tick']
-            path = self._frame_path(demo_path, tick)
-            scene_paths.append(path)
-            img = self._load_image(path)
-            if img is None:
-                img = _last_scene if _last_scene is not None else \
-                    np.zeros((self.img_size, self.img_size, 3), dtype=np.float32)
-            else:
-                _last_scene = img
-            if self.transform_scene:
-                img = self.transform_scene(img)
-            scene_frames.append(img)
-
-        scene_seq = torch.tensor(np.stack(scene_frames), dtype=torch.float32)
+            scene_paths.append(self._frame_path(demo_path, tick))
 
         # ---- RADAR: up to radar_window raw frames @1Hz ----
         raw_radar_indices = list(range(max(0, i - self.radar_window * 64 + 1), i + 1, 64))
@@ -400,6 +385,9 @@ class CSRoundDataset(Dataset):
                 self._safe_value(st.get('round_time_left'), 0.0) / 115.0,
                 float(self._safe_value(st.get('bomb_planted'), 0.0)),
                 float(self._safe_value(st.get('freeze_time'), 0.0)),
+                float(self._safe_value(st.get('defuser'), 0.0)),
+                self._safe_value((st.get('score') or [0, 0])[0], 0.0) / 16.0,
+                self._safe_value((st.get('score') or [0, 0])[1], 0.0) / 16.0,
             ]),
             self._encode_side(st['side']),
             self._encode_weapon(st['weapon']),
@@ -426,7 +414,8 @@ class CSRoundDataset(Dataset):
 
             intent_d = self._build_intent(keys_window)
             raw_intent_keys.append(torch.tensor(list(intent_d.values()), dtype=torch.float32))
-            mouse_delta = (mouse_end - mouse_start) / self.MOUSE_SCALE
+            window_size = end - start + 1
+            mouse_delta = (mouse_end - mouse_start) / (max(1, window_size) * self.MOUSE_SCALE)
             raw_intent_mouse.append(torch.tensor(mouse_delta, dtype=torch.float32))
 
         # Zero-pad at start if fewer than actions_window
@@ -455,25 +444,26 @@ class CSRoundDataset(Dataset):
         pitch_now = states[i]['mouse'][1]
         yaw_prev = states[t_start]['mouse'][0]
         pitch_prev = states[t_start]['mouse'][1]
+        actual_ticks = max(1, i - t_start + 1)  # actual window (< T at round start)
         target_mouse = torch.tensor(
-            [(yaw_now - yaw_prev) / self.MOUSE_SCALE,
-             (pitch_now - pitch_prev) / self.MOUSE_SCALE],
+            [(yaw_now - yaw_prev) / (actual_ticks * self.MOUSE_SCALE),
+             (pitch_now - pitch_prev) / (actual_ticks * self.MOUSE_SCALE)],
             dtype=torch.float32
         )
 
         return {
             'game_id': sample['game_id'],
             'round_id': sample['round_id'],
+            'demo_path': sample['demo_path'],
             'tick': states[i]['tick'],
-            'scene_seq': scene_seq,                  # (16, H, W, 3)
-            'scene_frame_paths': scene_paths,         # list[str] len=16
+            'scene_frame_paths': scene_paths,         # list[str] len=64
             'radar_seq': radar_seq,                   # (16, 224, 224, 3)
             'radar_frame_paths': radar_paths,          # list[str] len=16
-            'audio_waveform': audio_waveform,          # (256000,)
-            'actions_mouse': actions_mouse,             # (16, 2)
-            'actions_keys': actions_keys,               # (16, 20)
-            'state_vec': state_vec,                    # (95,)
+            'audio_waveform': audio_waveform,          # (2, 256000)
+            'actions_mouse': actions_mouse,             # (64, 2)
+            'actions_keys': actions_keys,               # (64, 20)
+            'state_vec': state_vec,                    # (100,)
             'intent': intent_vec,                      # (20,)
             'target_mouse': target_mouse,              # (2,)
-            'T': i - t_start + 1,
+            'T': T,
         }

@@ -1,5 +1,10 @@
 """
 Thread-safe ring buffers for streaming data (frames, audio, actions).
+
+Aligned with final_model/ architecture:
+  - StereoAudioBuffer: (2, N) stereo, 16 sec @ 16kHz
+  - ActionHistoryBuffer: max_size=64 (TemporalTransformer expects 64 action tokens)
+  - StateBuffer: state_dim=100
 """
 
 import time
@@ -16,57 +21,32 @@ class FrameBuffer:
     Stores (timestamp, frame) pairs with automatic eviction of old frames.
     """
 
-    def __init__(self, max_size: int = 129):
-        """
-        Initialize frame buffer.
-
-        Args:
-            max_size: Maximum number of frames to store
-        """
+    def __init__(self, max_size: int = 64):
         self.max_size = max_size
         self._buffer: Deque[Tuple[float, np.ndarray]] = deque(maxlen=max_size)
         self._lock = threading.RLock()
 
     def add(self, timestamp: float, frame: np.ndarray):
-        """
-        Add a frame to the buffer.
-
-        Args:
-            timestamp: Frame timestamp (time.time())
-            frame: Image frame (H, W, C) or (C, H, W)
-        """
         with self._lock:
             self._buffer.append((timestamp, frame.copy()))
 
     def get_recent(self, n: int) -> List[Tuple[float, np.ndarray]]:
-        """
-        Get the n most recent frames.
-
-        Args:
-            n: Number of frames to retrieve
-
-        Returns:
-            List of (timestamp, frame) pairs, oldest first
-        """
         with self._lock:
             if n >= len(self._buffer):
                 return list(self._buffer)
             return list(self._buffer)[-n:]
 
     def get_latest(self) -> Optional[Tuple[float, np.ndarray]]:
-        """Get the most recent frame."""
         with self._lock:
             if len(self._buffer) == 0:
                 return None
             return self._buffer[-1]
 
     def get_all(self) -> List[Tuple[float, np.ndarray]]:
-        """Get all frames in buffer."""
         with self._lock:
             return list(self._buffer)
 
     def clear(self):
-        """Clear all frames."""
         with self._lock:
             self._buffer.clear()
 
@@ -76,45 +56,53 @@ class FrameBuffer:
 
     @property
     def is_full(self) -> bool:
-        """Whether buffer has reached max capacity."""
         with self._lock:
             return len(self._buffer) >= self.max_size
 
 
-class AudioBuffer:
+class StereoAudioBuffer:
     """
-    Thread-safe rolling audio buffer.
+    Thread-safe rolling stereo audio buffer.
 
-    Maintains a fixed-size circular buffer of audio samples.
+    Stores (2, N) stereo samples for StereoAudioEncoder.
+    16 sec @ 16kHz = (2, 256000) samples.
     """
 
-    def __init__(self, sample_rate: int = 16000, duration: float = 30.0):
-        """
-        Initialize audio buffer.
-
-        Args:
-            sample_rate: Audio sample rate (Hz)
-            duration: Buffer duration (seconds)
-        """
+    def __init__(self, sample_rate: int = 16000, duration: float = 16.0, channels: int = 2):
         self.sample_rate = sample_rate
         self.duration = duration
-        self.buffer_size = int(sample_rate * duration)
+        self.channels = channels
+        self.buffer_size = int(sample_rate * duration)  # samples per channel
 
-        self._buffer = np.zeros(self.buffer_size, dtype=np.float32)
+        self._buffer = np.zeros((channels, self.buffer_size), dtype=np.float32)
         self._write_pos = 0
         self._total_samples = 0
         self._lock = threading.RLock()
 
     def add(self, audio: np.ndarray):
         """
-        Add audio samples to the buffer.
+        Add stereo audio samples to the buffer.
 
         Args:
-            audio: Audio samples (N,) float32
+            audio: (2, N) stereo or (N, 2) interleaved stereo float32
         """
         with self._lock:
-            audio = audio.astype(np.float32).flatten()
-            n = len(audio)
+            # Normalize to (2, N)
+            if audio.ndim == 1:
+                # Mono fallback: duplicate to both channels
+                audio = np.stack([audio, audio], axis=0)
+            elif audio.ndim == 2:
+                if audio.shape[0] != self.channels and audio.shape[1] == self.channels:
+                    audio = audio.T  # (N, 2) → (2, N)
+                elif audio.shape[0] != self.channels:
+                    # Take first 2 channels or duplicate
+                    if audio.shape[0] > self.channels:
+                        audio = audio[:self.channels]
+                    else:
+                        audio = np.stack([audio[0], audio[0]], axis=0)
+
+            audio = audio.astype(np.float32)
+            n = audio.shape[1]
 
             if n == 0:
                 return
@@ -122,33 +110,30 @@ class AudioBuffer:
             self._total_samples += n
 
             if self._write_pos + n <= self.buffer_size:
-                # Fits without wrapping
-                self._buffer[self._write_pos:self._write_pos + n] = audio
+                self._buffer[:, self._write_pos:self._write_pos + n] = audio
                 self._write_pos += n
             else:
-                # Need to shift buffer left and append
+                # Shift buffer left and append
                 shift = n
-                self._buffer[:-shift] = self._buffer[shift:].copy()
-                self._buffer[-n:] = audio
+                self._buffer[:, :-shift] = self._buffer[:, shift:].copy()
+                self._buffer[:, -n:] = audio
                 self._write_pos = self.buffer_size
 
     def get_buffer(self) -> np.ndarray:
         """
-        Get current audio buffer.
+        Get current stereo audio buffer.
 
         Returns:
-            Audio buffer (buffer_size,) float32
+            (2, buffer_size) float32 stereo audio
         """
         with self._lock:
             return self._buffer.copy()
 
     def get_filled_ratio(self) -> float:
-        """Get fraction of buffer filled (0-1)."""
         with self._lock:
             return min(1.0, self._write_pos / self.buffer_size)
 
     def clear(self):
-        """Clear buffer."""
         with self._lock:
             self._buffer.fill(0)
             self._write_pos = 0
@@ -159,22 +144,21 @@ class AudioBuffer:
             return self._write_pos
 
 
+# Keep old AudioBuffer for backwards compatibility
+class AudioBuffer(StereoAudioBuffer):
+    """Alias for StereoAudioBuffer."""
+    pass
+
+
 class ActionHistoryBuffer:
     """
     Buffer for tracking predicted action history.
 
-    Stores the last N action predictions for feeding back to the model.
+    TemporalCrossTransformer expects (B, 64, 22) action input which gets compressed
+    64→16 via ModalityCompressor. So we keep 64 action history entries.
     """
 
-    def __init__(self, max_size: int = 16, mouse_dim: int = 2, keys_dim: int = 20):
-        """
-        Initialize action history buffer.
-
-        Args:
-            max_size: Number of past actions to store
-            mouse_dim: Mouse action dimensions (yaw, pitch)
-            keys_dim: Number of key actions
-        """
+    def __init__(self, max_size: int = 64, mouse_dim: int = 2, keys_dim: int = 20):
         self.max_size = max_size
         self.mouse_dim = mouse_dim
         self.keys_dim = keys_dim
@@ -208,7 +192,7 @@ class ActionHistoryBuffer:
         Get combined action history for model input.
 
         Returns:
-            (max_size, mouse_dim + keys_dim) action history
+            (max_size, mouse_dim + keys_dim) = (64, 22)
         """
         with self._lock:
             return np.concatenate([
@@ -217,17 +201,14 @@ class ActionHistoryBuffer:
             ], axis=1)
 
     def get_mouse_history(self) -> np.ndarray:
-        """Get mouse delta history (max_size, 2)."""
         with self._lock:
             return self._mouse_history.copy()
 
     def get_keys_history(self) -> np.ndarray:
-        """Get keys history (max_size, 20)."""
         with self._lock:
             return self._keys_history.copy()
 
     def clear(self):
-        """Clear history."""
         with self._lock:
             self._mouse_history.fill(0)
             self._keys_history.fill(0)
@@ -235,24 +216,14 @@ class ActionHistoryBuffer:
 
     @property
     def filled_count(self) -> int:
-        """Number of actions in history."""
         with self._lock:
             return self._write_pos
 
 
 class StateBuffer:
-    """
-    Buffer for game state vectors from GSI.
-    """
+    """Buffer for game state vectors from GSI. State dim = 100."""
 
-    def __init__(self, max_size: int = 16, state_dim: int = 95):
-        """
-        Initialize state buffer.
-
-        Args:
-            max_size: Number of states to store
-            state_dim: Dimension of state vector
-        """
+    def __init__(self, max_size: int = 16, state_dim: int = 100):
         self.max_size = max_size
         self.state_dim = state_dim
 
@@ -260,25 +231,21 @@ class StateBuffer:
         self._lock = threading.RLock()
 
     def add(self, timestamp: float, state_vec: np.ndarray):
-        """Add a state vector."""
         with self._lock:
             self._buffer.append((timestamp, state_vec.copy()))
 
     def get_latest(self) -> Optional[Tuple[float, np.ndarray]]:
-        """Get the most recent state."""
         with self._lock:
             if len(self._buffer) == 0:
                 return None
             return self._buffer[-1]
 
     def get_recent(self, n: int) -> List[np.ndarray]:
-        """Get n most recent state vectors."""
         with self._lock:
             states = list(self._buffer)[-n:]
             return [s[1] for s in states]
 
     def clear(self):
-        """Clear buffer."""
         with self._lock:
             self._buffer.clear()
 
@@ -287,42 +254,40 @@ class StateBuffer:
             return len(self._buffer)
 
 
-def test_buffers():
-    """Test buffer implementations."""
-    print("Testing FrameBuffer...")
-    fb = FrameBuffer(max_size=5)
+class DetectionBuffer:
+    """
+    Ring buffer for detection vectors.
 
-    for i in range(10):
-        frame = np.random.rand(480, 640, 3).astype(np.float32)
-        fb.add(time.time(), frame)
+    Each detection vector is (detection_dim,) = (100,) = 20 dets × 5 features.
+    TemporalCrossTransformer expects (B, 16, 100) detection sequence.
+    """
 
-    print(f"  Buffer length: {len(fb)} (max: 5)")
-    print(f"  Recent 3: {len(fb.get_recent(3))} frames")
+    def __init__(self, max_size: int = 16, detection_dim: int = 100):
+        self.max_size = max_size
+        self.detection_dim = detection_dim
 
-    print("\nTesting AudioBuffer...")
-    ab = AudioBuffer(sample_rate=16000, duration=1.0)
+        self._buffer = np.zeros((max_size, detection_dim), dtype=np.float32)
+        self._write_pos = 0
+        self._lock = threading.RLock()
 
-    for i in range(5):
-        chunk = np.random.rand(3200).astype(np.float32)
-        ab.add(chunk)
+    def add(self, detection_vec: np.ndarray):
+        """Add detection vector (100,)."""
+        with self._lock:
+            self._buffer[:-1] = self._buffer[1:]
+            self._buffer[-1] = detection_vec[:self.detection_dim]
+            self._write_pos = min(self._write_pos + 1, self.max_size)
 
-    print(f"  Buffer length: {len(ab)}")
-    print(f"  Filled ratio: {ab.get_filled_ratio():.2f}")
-    print(f"  Buffer shape: {ab.get_buffer().shape}")
+    def get_sequence(self) -> np.ndarray:
+        """Get full detection sequence (max_size, detection_dim) = (16, 100)."""
+        with self._lock:
+            return self._buffer.copy()
 
-    print("\nTesting ActionHistoryBuffer...")
-    ahb = ActionHistoryBuffer(max_size=16)
+    def clear(self):
+        with self._lock:
+            self._buffer.fill(0)
+            self._write_pos = 0
 
-    for i in range(20):
-        mouse = np.random.rand(2).astype(np.float32)
-        keys = np.random.rand(20).astype(np.float32)
-        ahb.add(mouse, keys)
-
-    print(f"  History shape: {ahb.get_history().shape}")
-    print(f"  Filled count: {ahb.filled_count}")
-
-    print("\nAll tests passed!")
-
-
-if __name__ == "__main__":
-    test_buffers()
+    @property
+    def filled_count(self) -> int:
+        with self._lock:
+            return self._write_pos

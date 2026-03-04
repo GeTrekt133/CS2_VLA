@@ -156,6 +156,13 @@ class RadarRenderer:
             return
 
         target_team = target_row['team_num'].iloc[0]
+        if pd.isna(target_team):
+            print(f"[RadarRenderer] WARNING: target team_num is NaN")
+            self._teammates = []
+            self._teammates_steamid = []
+            self._dict_colors = {-1: ENEMY_COLOR}
+            self._cd_dead = {}
+            return
         team_df = tmp[tmp['team_num'] == target_team]
         self._teammates = list(team_df['user_id'])
         self._teammates_steamid = list(map(int, team_df['steamid']))
@@ -190,6 +197,8 @@ class RadarRenderer:
 
         for i in range(len(tick_df)):
             row = tick_df.iloc[i]
+            if pd.isna(row['X']) or pd.isna(row['Y']):
+                continue
             x, y = self._world_to_pixel(row['X'], row['Y'])
             raw_uid = row['user_id']
             steamid = row['steamid']
@@ -260,6 +269,8 @@ class RadarRenderer:
             if not bomb_planted:
                 bomb_icon = self._bomb_icons.get(color)
                 if bomb_icon is not None:
+                    if pd.isna(row['bombX']) or pd.isna(row['bombY']):
+                        return False
                     bx, by = self._world_to_pixel(row['bombX'], row['bombY'])
                     self._paste_icon(img, bomb_icon, bx, by)
                     return True
@@ -284,6 +295,8 @@ class RadarRenderer:
         if self._bomb_white is None:
             return
 
+        if pd.isna(row['bombX']) or pd.isna(row['bombY']):
+            return
         bx, by = self._world_to_pixel(row['bombX'], row['bombY'])
         self._paste_icon(img, self._bomb_white, bx, by)
 
@@ -304,6 +317,8 @@ class RadarRenderer:
 
     def _draw_direction_triangle(self, img, row, x, y):
         """Draw direction-pointing triangle for a player."""
+        if pd.isna(row['yaw']):
+            return
         yaw_rad = math.pi * 2 - math.radians(row['yaw'])
 
         tip_x = x + math.cos(yaw_rad) * MARKER_SIZE
@@ -324,6 +339,8 @@ class RadarRenderer:
 
     def _draw_fov_cone(self, img, row, x, y):
         """Draw FOV visibility cone for target player."""
+        if pd.isna(row['yaw']):
+            return
         yaw_rad = math.pi * 2 - math.radians(row['yaw'])
         half_fov = math.radians(FOV_ANGLE / 2)
         left_bound = yaw_rad - half_fov

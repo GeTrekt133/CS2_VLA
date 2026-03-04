@@ -23,9 +23,8 @@ from pathlib import Path
 import torch
 import numpy as np
 
-# Add src paths
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'src'))
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'audio_adaptation' / 'src'))
+# Add final_model path
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / 'final_model'))
 
 try:
     import tensorrt as trt
@@ -84,7 +83,7 @@ def export_radar_to_onnx(radar_encoder, output_path: str, batch_size: int = 1):
     return pytorch_output.cpu().numpy()
 
 
-def export_yolo_to_onnx(yolo_model, output_path: str, batch_size: int = 1, img_size: tuple = (640, 480)):
+def export_yolo_to_onnx(yolo_model, output_path: str, batch_size: int = 1, img_size: tuple = (640, 640)):
     """
     Export YOLO scene encoder to ONNX.
 
@@ -92,7 +91,7 @@ def export_yolo_to_onnx(yolo_model, output_path: str, batch_size: int = 1, img_s
         yolo_model: PyTorch YOLO DetectionModel
         output_path: Path to save .onnx file
         batch_size: Fixed batch size
-        img_size: (width, height) of input images
+        img_size: (width, height) of input images — must be 640x640 for YOLOv11l
     """
     print(f"\n[1/3] Exporting YOLO scene encoder to ONNX...")
 
@@ -102,16 +101,16 @@ def export_yolo_to_onnx(yolo_model, output_path: str, batch_size: int = 1, img_s
     W, H = img_size
     dummy_input = torch.randn(batch_size, 3, H, W, device='cuda')
 
-    # YOLO returns (detections, embeddings)
-    # We only need embeddings for caching
+    # Wrap embed_from_features pipeline for TRT export
+    # Returns (B, 512) embed via extract_features → embed_from_features
     class YOLOEmbedOnly(torch.nn.Module):
         def __init__(self, yolo):
             super().__init__()
             self.yolo = yolo
 
         def forward(self, x):
-            _, embeddings = self.yolo(x)
-            return embeddings
+            p3, p5 = self.yolo.extract_features(x)
+            return self.yolo.embed_from_features(p3, p5)  # (B, 512)
 
     embed_only_model = YOLOEmbedOnly(yolo_model).eval()
 
@@ -156,8 +155,8 @@ def export_audio_to_onnx(audio_encoder, output_path: str, batch_size: int = 1):
 
     audio_encoder.eval()
 
-    # Create dummy input (batch_size, 480000) - 30 sec @ 16kHz
-    dummy_input = torch.randn(batch_size, 480000, device='cuda')
+    # Create dummy input (batch_size, 2, 256000) - 16 sec stereo @ 16kHz
+    dummy_input = torch.randn(batch_size, 2, 256000, device='cuda')
 
     # Export to ONNX
     torch.onnx.export(
@@ -193,9 +192,9 @@ def export_temporal_to_onnx(
     output_path: str,
     batch_size: int = 1,
     use_audio: bool = True,
-    radar_seq_len: int = 129,
-    scene_seq_len: int = 16,
-    audio_seq_len: int = 60
+    radar_seq_len: int = 16,
+    scene_seq_len: int = 64,
+    audio_seq_len: int = 16
 ):
     """
     Export TemporalTransformer + FlowActionHead to ONNX.
@@ -256,12 +255,12 @@ def export_temporal_to_onnx(
 
     wrapper = TemporalFlowWrapper(temporal_model, flow_head, use_audio).eval()
 
-    # Create dummy inputs
+    # Create dummy inputs matching final_model/ architecture
     dummy_radar = torch.randn(batch_size, radar_seq_len, 512, device='cuda')
-    dummy_scene = torch.randn(batch_size, scene_seq_len, 2048, device='cuda')
-    dummy_detection = torch.randn(batch_size, 1, 100, device='cuda')
-    dummy_action = torch.randn(batch_size, 16, 22, device='cuda')
-    dummy_state = torch.randn(batch_size, 95, device='cuda')
+    dummy_scene = torch.randn(batch_size, scene_seq_len, 512, device='cuda')
+    dummy_detection = torch.randn(batch_size, 16, 100, device='cuda')
+    dummy_action = torch.randn(batch_size, 64, 22, device='cuda')
+    dummy_state = torch.randn(batch_size, 100, device='cuda')
 
     if use_audio:
         dummy_audio = torch.randn(batch_size, audio_seq_len, 512, device='cuda')
@@ -455,10 +454,8 @@ def main():
                         help='Fixed batch size for TRT engine')
     parser.add_argument('--workspace-gb', type=int, default=4,
                         help='TensorRT workspace size in GB')
-    parser.add_argument('--src-path', type=str, default='./src',
-                        help='Path to src folder')
-    parser.add_argument('--audio-src-path', type=str, default='./audio_adaptation/src',
-                        help='Path to audio_adaptation/src folder')
+    parser.add_argument('--final-model-path', type=str, default='./final_model',
+                        help='Path to final_model folder')
 
     args = parser.parse_args()
 
@@ -491,8 +488,6 @@ def main():
         checkpoint_path=args.checkpoint,
         device='cuda',
         use_audio=load_audio,
-        src_path=args.src_path,
-        audio_src_path=args.audio_src_path
     )
 
     models.eval()
@@ -527,9 +522,9 @@ def main():
         onnx_path = output_dir / "yolo_embed.onnx"
         trt_path = output_dir / "yolo_embed.trt"
 
-        # Export to ONNX
-        dummy_input = torch.randn(args.batch_size, 3, 480, 640, device='cuda')
-        pytorch_output = export_yolo_to_onnx(models.yolo, str(onnx_path), args.batch_size, img_size=(640, 480))
+        # Export to ONNX — square 640×640 for YOLOv11l
+        dummy_input = torch.randn(args.batch_size, 3, 640, 640, device='cuda')
+        pytorch_output = export_yolo_to_onnx(models.yolo, str(onnx_path), args.batch_size, img_size=(640, 640))
 
         # Convert to TRT
         if build_trt_engine(str(onnx_path), str(trt_path), fp16=True, workspace_gb=args.workspace_gb):
@@ -548,8 +543,8 @@ def main():
             onnx_path = output_dir / "audio_encoder.onnx"
             trt_path = output_dir / "audio_encoder.trt"
 
-            # Export to ONNX
-            dummy_input = torch.randn(args.batch_size, 480000, device='cuda')
+            # Export to ONNX — stereo 16 sec @ 16kHz
+            dummy_input = torch.randn(args.batch_size, 2, 256000, device='cuda')
             pytorch_output = export_audio_to_onnx(models.audio_encoder, str(onnx_path), args.batch_size)
 
             # Convert to TRT
@@ -574,7 +569,7 @@ def main():
         from TemporalTransformer import FlowActionHead
 
         flow_head = FlowActionHead(
-            context_dim=512,
+            context_dim=384,  # must match d_model of TemporalCrossTransformer
             action_dim=2,
             hidden_dim=256,
             noise_scale=0.3,
@@ -601,9 +596,9 @@ def main():
             str(onnx_path),
             batch_size=args.batch_size,
             use_audio=load_audio,
-            radar_seq_len=129,  # Fixed from config
-            scene_seq_len=16,
-            audio_seq_len=60
+            radar_seq_len=16,   # final_model: 16 radar tokens
+            scene_seq_len=64,   # final_model: 64 scene tokens (ModalityCompressor 64→16 internally)
+            audio_seq_len=16    # final_model: 16 audio tokens (after linspace 32→16)
         )
 
         # Convert to TRT

@@ -41,7 +41,7 @@ def benchmark_full_pipeline(
     from models.model_loader import load_models
     from inference.preprocessor import Preprocessor
     from inference.embedding_cache import GPUEmbeddingCache, AudioEmbeddingCache
-    from config import InferenceConfig
+    from config import Config as InferenceConfig
 
     print(f"\n{'='*60}")
     print(f"Configuration:")
@@ -63,7 +63,7 @@ def benchmark_full_pipeline(
 
     # Create config
     config = InferenceConfig()
-    preprocessor = Preprocessor(device='cuda', config=config)
+    preprocessor = Preprocessor(device='cuda')
 
     # Create caches if enabled
     radar_cache = None
@@ -73,18 +73,18 @@ def benchmark_full_pipeline(
     if use_cache:
         print("Initializing caches...")
         radar_cache = GPUEmbeddingCache(capacity=256, emb_dim=512, device='cuda')
-        scene_cache = GPUEmbeddingCache(capacity=128, emb_dim=2048, device='cuda')
+        scene_cache = GPUEmbeddingCache(capacity=128, emb_dim=512, device='cuda')
         if use_audio:
-            audio_cache = AudioEmbeddingCache(capacity=120, emb_dim=512, device='cuda')
+            audio_cache = AudioEmbeddingCache(device='cuda')
         print("✅ Caches initialized")
 
     # Generate mock data
     print("Generating test data...")
     radar_frames = torch.randn(config.radar_buffer_size, 3, 224, 224, device='cuda')
-    scene_frames = torch.randn(config.scene_buffer_size, 3, 480, 640, device='cuda')
-    audio_buffer = torch.randn(480000, device='cuda') if use_audio else None
-    action_history = torch.randn(config.actions_buffer_size, 22, device='cuda')
-    state_vec = torch.randn(95, device='cuda')
+    scene_frames = torch.randn(config.scene_buffer_size, 3, 640, 640, device='cuda')  # square for YOLO
+    audio_buffer = torch.randn(2, 256000, device='cuda') if use_audio else None  # stereo 16sec
+    action_history = torch.randn(64, 22, device='cuda')  # 64 action history (ModalityCompressor 64→16)
+    state_vec = torch.randn(100, device='cuda')  # state_dim=100
 
     # Warmup
     print("Warming up...")
@@ -168,7 +168,7 @@ def _run_single_inference(
         radar_seq = radar_cache.add_and_get_sequence(
             latest_radar.squeeze(1),
             models.radar_encoder,
-            seq_length=config.radar_buffer_size
+            seq_length=16  # radar_seq=16 after linspace
         )
         radar_embeds = radar_seq.unsqueeze(0)  # (1, seq, 512)
     else:
@@ -187,23 +187,31 @@ def _run_single_inference(
 
     if use_cache and scene_cache is not None:
         latest_scene = scene_frames[-1:].unsqueeze(0)  # (1, 1, 3, H, W)
+
+        def yolo_embed_fn(x):
+            p3, p5 = models.yolo.extract_features(x)
+            return models.yolo.embed_from_features(p3, p5)  # (B, 512)
+
         scene_seq = scene_cache.add_and_get_sequence(
             latest_scene.squeeze(1),
-            lambda x: models.yolo.embeds(x),
-            seq_length=config.scene_buffer_size
+            yolo_embed_fn,
+            seq_length=64  # scene_seq=64 for ModalityCompressor
         )
-        scene_embeds = scene_seq.unsqueeze(0)  # (1, seq, 2048)
+        scene_embeds = scene_seq.unsqueeze(0)  # (1, 64, 512)
 
         # Get detections from latest frame only
         with torch.no_grad():
-            yolo_output = models.yolo(latest_scene.squeeze(1))
-            detections = preprocessor._process_yolo_detections(yolo_output)
+            det_raw = models.yolo.forward_detections_only(latest_scene.squeeze(1))
+            det_vec = preprocessor._postprocess_detections(det_raw, models.yolo, max_det=20)
+            detections = torch.from_numpy(det_vec).unsqueeze(0).unsqueeze(0).to('cuda')  # (1,1,100) stub
     else:
         scene_tensor = scene_frames.unsqueeze(0)
-        scene_embeds, detections = preprocessor.encode_scene_sequence(
+        scene_embeds, det_vec = preprocessor.encode_scene_frame(
             models.yolo,
-            scene_tensor
+            scene_frames[-1:]
         )
+        scene_embeds = scene_embeds.unsqueeze(1).expand(-1, 64, -1)  # stub seq
+        detections = torch.zeros(1, 16, 100, device='cuda')
 
     torch.cuda.synchronize()
     timing['scene'] = time.time() - start
@@ -214,16 +222,18 @@ def _run_single_inference(
         start = time.time()
 
         if use_cache and audio_cache is not None:
-            audio_seq = audio_cache.add_or_get_sequence(
-                audio_buffer.unsqueeze(0),
-                models.audio_encoder,
-                timestamp=time.time(),
-                audio_window_sec=30.0
+            # AudioEmbeddingCache.get_embeddings returns (1, 16, 512) after linspace
+            audio_embeds = audio_cache.get_embeddings(
+                audio_buffer.unsqueeze(0),  # (1, 2, 256000)
+                current_position=int(time.time() * 16000),
+                encoder=models.audio_encoder,
             )
-            audio_embeds = audio_seq.unsqueeze(0)  # (1, 60, 512)
         else:
             with torch.no_grad():
-                audio_embeds = models.audio_encoder(audio_buffer.unsqueeze(0))
+                audio_embeds = preprocessor.encode_audio(
+                    models.audio_encoder,
+                    audio_buffer.unsqueeze(0)  # (1, 2, 256000)
+                )  # returns (1, 16, 512)
 
         torch.cuda.synchronize()
         timing['audio'] = time.time() - start
@@ -234,8 +244,8 @@ def _run_single_inference(
     torch.cuda.synchronize()
     start = time.time()
 
-    action_seq = action_history.unsqueeze(0)  # (1, 16, 22)
-    state = state_vec.unsqueeze(0)  # (1, 95)
+    action_seq = action_history.unsqueeze(0)  # (1, 64, 22)
+    state = state_vec.unsqueeze(0)  # (1, 100)
 
     with torch.no_grad():
         mouse_embed, policy_keys, value = models.temporal_model(

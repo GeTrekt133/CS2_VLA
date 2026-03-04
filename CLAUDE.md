@@ -59,7 +59,7 @@ Total:     ~52.2M   |   Trainable: ~26.8M   |   Ratio: 1.72x ✅
 - Зачем стерео: CS2 HRTF → шаги/выстрелы имеют L-R разницу → направление угрозы
 
 #### 4. TemporalTransformer (`TemporalTransformer.py`) — Unified
-- `d_model=384`, `num_heads=6`, `depth=4`, `ff_mult=4`, pre-LayerNorm
+- `d_model=384`, `num_heads=8`, `depth=4`, `ff_mult=4`, pre-LayerNorm
 - **ModalityCompressor**: cross-attention сжатие 64→16 через 16 learnable query tokens
   - Используется для scene (64→16) и action (64→16)
 - Все 6 модальностей конкатенируются → единый shared self-attention
@@ -70,7 +70,7 @@ Total:     ~52.2M   |   Trainable: ~26.8M   |   Ratio: 1.72x ✅
   audio:     16 tokens  (32 raw → linspace 16)   ← optional
   detection: 16 tokens  (64 raw → linspace 16)
   action:    16 tokens  (64 raw → ModalityCompressor 64→16)
-  state:      1 token   (95-dim → proj 384)
+  state:      1 token   (100-dim → proj 384)
   ─────────────────────────────────────────
   Total:     81 tokens (with audio)
   ```
@@ -82,21 +82,27 @@ Total:     ~52.2M   |   Trainable: ~26.8M   |   Ratio: 1.72x ✅
 
 ### Backbone Caching (ключевая оптимизация)
 
-YOLO backbone (frozen) кешируется на диск/CPU для ускорения обучения в ~7x:
+YOLO backbone (frozen) кешируется в FeatureCache (LRU, float16, CPU) для ускорения:
 
 ```python
-# В Train.py:
-with torch.no_grad():
-    p3, p5 = yolo.extract_features(img_tensor)   # P3: float16, CPU → cache
-    det_vec = get_det_vector(frame_path, yolo, ...)  # detection → cache
+# В Train.py — два кеша:
+feat_cache = FeatureCache(max_size=5000)   # (p3, p5) tuples
+det_cache  = FeatureCache(max_size=5000)   # detection vectors
 
-# Каждый шаг (с gradient):
-scene_embed = yolo.embed_from_features(p3, p5)    # trainable, 1.6M params
+# build_scene_embeddings: проверяет кеш per frame path
+cached = feat_cache.get(frame_path)  # → (p3, p5) or None
+# backbone forward только для uncached frames
+p3, p5 = yolo.extract_features(imgs)  # no_grad, frozen
+feat_cache.put(path, (p3, p5))  # stored as float16 CPU
+
+# embed head всегда с gradient:
+scene_embed = yolo.embed_from_features(p3, p5)  # trainable, 1.6M params
 ```
 
-- P3 features: `(N, 256, 80, 80)` → кешируется в float16 (≈6MB/frame)
-- Detection vec: `(max_det * 5,)` = `(100,)` float32
-- Ключ кеша: path к frame файлу (in-memory dict или h5)
+- P3 features: `(256, 80, 80)` + P5: `(512, 20, 20)` → float16 CPU (~3MB/frame pair)
+- Detection vec: `(max_det * 5,)` = `(100,)` float16 CPU
+- Ключ кеша: path к frame файлу
+- Hit rate: ~0% epoch 1 → ~90%+ epoch 2+ (10-20x speedup после прогрева)
 
 ### Data Flow
 
@@ -112,7 +118,7 @@ scene_embed = yolo.embed_from_features(p3, p5)    # trainable, 1.6M params
                        freq pool + temporal pool → (B, 32, 960) → project → (B, 32, 512)
 [Action history] → DatasetIntent → (B, 64, 22)
                                   → ModalityCompressor → (B, 16, 22)
-[Game State]     → (B, 95)
+[Game State]     → (B, 100)
                         ↓
             TemporalTransformer d=384, L=4
             (B, 81, 384) unified self-attention
@@ -135,11 +141,12 @@ ACTION_SEQ_LEN = 64   # история действий: 64 окна (~4 sec) �
 | radar        | 32 frames @1Hz   | linspace → 16   | 32 sec   |
 | scene        | 64 frames @16Hz  | cross-attn → 16 | 4 sec    |
 | audio        | 32 stereo embeds @0.5s | linspace → 16 | 16 sec |
-| detection    | 64 frames @16Hz  | linspace → 16   | 4 sec    |
+| detection    | 64 frames @stride=T | linspace → 16 | T-synced |
 | action       | 64 windows       | cross-attn → 16 | 4 sec    |
-| state        | 95 scalars       | proj → 1 token  | current  |
+| state        | 100 scalars      | proj → 1 token  | current  |
 
-- `state_dim`: 95 (9 scalars + 2 side + 42 weapon + 42 weapon_list)
+- `state_dim`: 100 (12 scalars + 2 side + 43 weapon + 43 weapon_list)
+  - 12 scalars: hp, armor, helmet, ammo, ct_alive, t_alive, round_time_left, bomb_planted, freeze_time, defuser, score_ct, score_t
 - `detection_dim`: 100 (20 detections × 5 features: x1,y1,x2,y2,conf)
 - `action_dim`: 22 (2 mouse + 20 keys)
 
@@ -159,11 +166,20 @@ MAX_DET    = 20      # максимум детекций на кадр
 SEED       = 42
 ```
 
+### T Parameter (Intent Shift / FPS Emulation)
+
+- `T_min=1, T_max=6` → `allowed_T = [1, 2, 3, 4, 5, 6]`
+- T=1 → 64 FPS, T=2 → 32 FPS, T=4 → 16 FPS, T=6 → ~10.7 FPS
+- Randomly sampled per-sample (deterministic by idx)
+- **Mouse delta normalized by T**: `target = delta / (T * MOUSE_SCALE)` — per-tick rate
+- At inference: `predicted_rate * T_inference` to get actual delta
+- Action history mouse also normalized by window size for consistency
+
 ### Loss Functions
 
 | Выход        | Loss                  | Примечание                         |
 |--------------|-----------------------|------------------------------------|
-| mouse delta  | Flow Matching (MSE v) | yaw + pitch через velocity field   |
+| mouse delta  | Flow Matching (MSE v) | per-tick rate (normalized by T)    |
 | keys (20)    | BCEWithLogitsLoss     | × W_KEYS=100 из-за редкости нажатий|
 | value        | (будущий critic loss) | пока не используется в BC          |
 
@@ -182,9 +198,21 @@ temporal_model        # ~19.0M  (d=384, L=4)
 flow_head             # ~0.3M   (FlowActionHead)
 ```
 
+### Mixed Precision (AMP)
+
+- `torch.amp.GradScaler` + `torch.amp.autocast(device_type='cuda', dtype=torch.float16)`
+- Training: autocast around forward+loss, scaler for backward/step
+- Evaluation: autocast only (no scaler needed under no_grad)
+- Fallback: CPU training works without AMP (scaler=None)
+
+### DataLoader
+
+- `num_workers=2, persistent_workers=True` — параллельная загрузка данных
+- Custom `collate_fn`: стакает тензоры, собирает lists для paths/strings
+
 ### Checkpoints
 
-Сохраняются в `./checkpoints2/<run_name>/`:
+Сохраняются в `./checkpoints_final/<run_name>/`:
 - `radar_encoder`, `yolo`, `temporal_model`, `flow_head`, `audio_encoder`, `optimizer`
 - Загрузка с `strict=False`
 

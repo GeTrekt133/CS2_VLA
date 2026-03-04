@@ -12,7 +12,7 @@ import numpy as np
 
 # Add paths
 base_path = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(base_path / "src"))
+sys.path.insert(0, str(base_path / "final_model"))
 sys.path.insert(0, str(base_path / "inference_pipeline"))
 
 from inference.embedding_cache import GPUEmbeddingCache, AudioEmbeddingCache
@@ -82,25 +82,41 @@ def test_audio_cache():
     """Test audio embedding cache."""
     print("\n=== Test 3: Audio Embedding Cache ===")
 
-    cache = AudioEmbeddingCache(capacity=120, emb_dim=512, device='cuda')
+    cache = AudioEmbeddingCache(device='cuda')
 
-    # Mock audio encoder
+    # Mock StereoAudioEncoder: (1, 2, 256000) → (1, 32, 512)
     def mock_audio_encoder(x):
-        return torch.randn(1, 60, 512, device='cuda')
+        return torch.randn(1, 32, 512, device='cuda')
 
-    # Add audio at different timestamps
-    for i in range(10):
-        timestamp = i * 1.0
-        seq = cache.add_or_get_sequence(
-            torch.randn(1, 480000, device='cuda'),
-            mock_audio_encoder,
-            timestamp=timestamp,
-            audio_window_sec=30.0
-        )
+    # Get embeddings at different sample positions
+    # First call: cache miss, should encode and linspace 32→16
+    emb1 = cache.get_embeddings(
+        torch.randn(1, 2, 256000, device='cuda'),
+        current_position=0,
+        encoder=mock_audio_encoder,
+    )
+    assert emb1.shape == (1, 16, 512), f"Wrong shape: {emb1.shape}"
 
-        assert seq.shape == (60, 512), f"Wrong shape: {seq.shape}"
-        assert seq.device.type == 'cuda', "Sequence not on GPU"
+    # Second call: same position → cache hit
+    emb2 = cache.get_embeddings(
+        torch.randn(1, 2, 256000, device='cuda'),
+        current_position=100,  # < 8000 step → cache hit
+        encoder=mock_audio_encoder,
+    )
+    assert emb2.shape == (1, 16, 512), f"Wrong shape: {emb2.shape}"
+    assert cache.cache_hits == 1, "Expected 1 cache hit"
 
+    # Third call: past the 8000-sample threshold → cache miss
+    emb3 = cache.get_embeddings(
+        torch.randn(1, 2, 256000, device='cuda'),
+        current_position=9000,  # > 8000 step → cache miss
+        encoder=mock_audio_encoder,
+    )
+    assert emb3.shape == (1, 16, 512), f"Wrong shape: {emb3.shape}"
+    assert cache.cache_misses == 2, "Expected 2 cache misses"
+
+    stats = cache.get_stats()
+    print(f"  Cache stats: {stats}")
     print(f"✅ Audio cache passed")
 
 
@@ -248,10 +264,10 @@ def test_memory_usage():
 
     initial_mem = torch.cuda.memory_allocated() / 1024**2  # MB
 
-    # Create caches
+    # Create caches — scene emb_dim=512 (not 2048), audio cache is lightweight
     radar_cache = GPUEmbeddingCache(capacity=256, emb_dim=512, device='cuda')
-    scene_cache = GPUEmbeddingCache(capacity=128, emb_dim=2048, device='cuda')
-    audio_cache = AudioEmbeddingCache(capacity=120, emb_dim=512, device='cuda')
+    scene_cache = GPUEmbeddingCache(capacity=128, emb_dim=512, device='cuda')
+    audio_cache = AudioEmbeddingCache(device='cuda')  # stores only (1, 16, 512)
 
     cache_mem = torch.cuda.memory_allocated() / 1024**2  # MB
     overhead = cache_mem - initial_mem
@@ -260,17 +276,16 @@ def test_memory_usage():
     print(f"After cache creation: {cache_mem:.2f} MB")
     print(f"Cache overhead: {overhead:.2f} MB")
 
-    # Expected overhead
+    # Expected overhead for ring buffers (audio cache is not pre-allocated)
     expected = (
-        (256 * 512 * 4) +      # Radar: 512 KB
-        (128 * 2048 * 4) +     # Scene: 1 MB
-        (120 * 60 * 512 * 4)   # Audio: 14.6 MB
+        (256 * 512 * 4) +   # Radar GPUEmbeddingCache: 0.5 MB
+        (128 * 512 * 4)     # Scene GPUEmbeddingCache: 0.25 MB
     ) / 1024**2
 
-    print(f"Expected overhead: {expected:.2f} MB")
+    print(f"Expected ring buffer overhead: ~{expected:.2f} MB")
 
-    if abs(overhead - expected) > 5:  # Allow 5 MB tolerance
-        print(f"⚠️  Warning: Memory overhead differs from expected by {abs(overhead - expected):.2f} MB")
+    if overhead > expected + 5:
+        print(f"⚠️  Warning: Memory overhead {overhead:.2f} MB exceeds expected {expected:.2f} MB")
     else:
         print(f"✅ Memory usage as expected")
 

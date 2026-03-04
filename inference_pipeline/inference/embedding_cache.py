@@ -1,16 +1,16 @@
 """
 GPU-based embedding cache for efficient sequence encoding.
 
-Key features:
-- All embeddings stored in GPU VRAM (no CPU↔GPU transfers)
-- Ring buffer design for constant memory usage
-- Frame-level caching with timestamp tracking
-- Cache invalidation on game state changes
+Aligned with final_model/ architecture:
+  - Scene cache: emb_dim=512 (YOLO embed, NOT 2048)
+  - Radar cache: emb_dim=512
+  - Audio cache: StereoAudioEncoder → (1, 32, 512) → linspace (1, 16, 512)
+    Re-encode when 0.5 sec of new data (8000 stereo samples)
 """
 
 import torch
 import numpy as np
-from typing import Optional, Callable, Tuple
+from typing import Optional, Callable
 
 
 class GPUEmbeddingCache:
@@ -18,13 +18,12 @@ class GPUEmbeddingCache:
     GPU ring buffer for caching embeddings.
 
     Stores embeddings on GPU to avoid:
-    - Re-encoding duplicate frames (31/32 are duplicates!)
+    - Re-encoding duplicate frames (63/64 are duplicates!)
     - CPU↔GPU memory transfers
 
     Memory layout:
     - self.buffer: torch.Tensor (capacity, emb_dim) on GPU
-    - self.timestamps: np.ndarray (capacity,) on CPU for fast lookup
-    - self.frame_hashes: Optional[np.ndarray] for validation
+    - self.timestamps: np.ndarray (capacity,) on CPU
     """
 
     def __init__(
@@ -36,8 +35,8 @@ class GPUEmbeddingCache:
     ):
         """
         Args:
-            capacity: Maximum number of embeddings to cache (e.g., 256)
-            emb_dim: Embedding dimension (512 for radar, 2048 for scene)
+            capacity: Maximum number of embeddings to cache
+            emb_dim: Embedding dimension (512 for both radar and scene)
             device: GPU device
             enable_validation: Whether to hash frames for cache validation
         """
@@ -46,19 +45,16 @@ class GPUEmbeddingCache:
         self.device = device
         self.enable_validation = enable_validation
 
-        # GPU storage for embeddings (preallocated)
         self.buffer = torch.zeros(
             capacity, emb_dim,
             dtype=torch.float32,
             device=device
         )
 
-        # CPU storage for metadata
         self.timestamps = np.zeros(capacity, dtype=np.float64)
-        self.head = 0  # Current write position
-        self.count = 0  # Total frames added
+        self.head = 0
+        self.count = 0
 
-        # Optional: Frame validation hashes
         if enable_validation:
             self.frame_hashes = np.zeros(capacity, dtype=np.uint64)
         else:
@@ -74,40 +70,24 @@ class GPUEmbeddingCache:
         """
         Encode new frame, add to cache, and return sequence of embeddings.
 
-        This is the CORE method that replaces:
-          OLD: encode_all_32_frames()
-          NEW: encode_1_frame() + retrieve_cached_sequence()
-
         Args:
             new_frame: (1, C, H, W) new frame to encode
-            encoder: Encoder function (radar_encoder or yolo.embeds)
-            seq_length: Length of sequence to return (e.g., 32)
-            timestamp: Optional timestamp for this frame
+            encoder: Encoder function → (1, emb_dim) or (emb_dim,)
+            seq_length: Length of sequence to return
+            timestamp: Optional timestamp
 
         Returns:
             embeddings: (seq_length, emb_dim) sequence on GPU
-
-        Example:
-            # OLD CODE (slow):
-            radar_embeds = radar_encoder(radar_tensor)  # (1, 32, 512)
-
-            # NEW CODE (fast):
-            latest_frame = radar_tensor[:, -1:]  # (1, 1, 3, 224, 224)
-            radar_embeds = cache.add_and_get_sequence(
-                latest_frame.squeeze(1),  # (1, 3, 224, 224)
-                radar_encoder,
-                seq_length=32
-            )  # (32, 512) in 6ms instead of 175ms!
         """
         # 1. Encode the new frame
         with torch.no_grad():
-            new_emb = encoder(new_frame)  # (1, emb_dim) or (1, 1, emb_dim)
+            new_emb = encoder(new_frame)
 
-            # Handle different encoder output formats
             if new_emb.dim() == 3:
-                new_emb = new_emb.squeeze(1)  # (1, emb_dim)
-
-            new_emb = new_emb.squeeze(0)  # (emb_dim,)
+                new_emb = new_emb.squeeze(1)
+            if new_emb.dim() == 2:
+                new_emb = new_emb.squeeze(0)
+            # now (emb_dim,)
 
         # 2. Store in ring buffer
         self.buffer[self.head] = new_emb
@@ -115,10 +95,8 @@ class GPUEmbeddingCache:
         if timestamp is not None:
             self.timestamps[self.head] = timestamp
 
-        # Optional: Hash validation
         if self.frame_hashes is not None:
-            frame_hash = self._hash_frame(new_frame)
-            self.frame_hashes[self.head] = frame_hash
+            self.frame_hashes[self.head] = self._hash_frame(new_frame)
 
         # 3. Update pointers
         self.head = (self.head + 1) % self.capacity
@@ -126,82 +104,96 @@ class GPUEmbeddingCache:
 
         # 4. Retrieve sequence of last seq_length embeddings
         if self.count < seq_length:
-            # Not enough frames yet - pad with zeros
             valid = min(self.count, seq_length)
             padding = seq_length - valid
 
             if padding > 0:
-                # Get all valid frames
                 if self.head >= valid:
-                    indices = torch.arange(
-                        self.head - valid, self.head,
-                        device=self.device
-                    )
+                    indices = torch.arange(self.head - valid, self.head, device=self.device)
                 else:
-                    # Wrap around
                     indices = torch.cat([
-                        torch.arange(
-                            self.capacity - (valid - self.head),
-                            self.capacity,
-                            device=self.device
-                        ),
+                        torch.arange(self.capacity - (valid - self.head), self.capacity, device=self.device),
                         torch.arange(0, self.head, device=self.device)
                     ])
 
                 valid_embeds = self.buffer[indices]
-
-                # Pad at beginning with zeros
                 padded = torch.cat([
-                    torch.zeros(
-                        padding, self.emb_dim,
-                        device=self.device,
-                        dtype=torch.float32
-                    ),
+                    torch.zeros(padding, self.emb_dim, device=self.device, dtype=torch.float32),
                     valid_embeds
                 ], dim=0)
-
-                return padded  # (seq_length, emb_dim)
+                return padded
             else:
-                # Exactly enough frames
-                indices = torch.arange(
-                    self.head - valid, self.head,
-                    device=self.device
-                )
+                indices = torch.arange(self.head - valid, self.head, device=self.device)
                 return self.buffer[indices]
 
         # Normal case: retrieve last seq_length embeddings
         if self.head >= seq_length:
-            # No wrap-around needed
-            indices = torch.arange(
-                self.head - seq_length,
-                self.head,
-                device=self.device
-            )
+            indices = torch.arange(self.head - seq_length, self.head, device=self.device)
         else:
-            # Wrap around ring buffer
             indices = torch.cat([
-                torch.arange(
-                    self.capacity + self.head - seq_length,
-                    self.capacity,
-                    device=self.device
-                ),
+                torch.arange(self.capacity + self.head - seq_length, self.capacity, device=self.device),
                 torch.arange(0, self.head, device=self.device)
             ])
 
-        return self.buffer[indices]  # (seq_length, emb_dim) - ALL ON GPU!
+        return self.buffer[indices]
+
+    def add_embedding(self, embedding: torch.Tensor, timestamp: Optional[float] = None):
+        """
+        Add a pre-computed embedding to the cache (no encoding).
+
+        Args:
+            embedding: (emb_dim,) or (1, emb_dim) embedding tensor
+        """
+        if embedding.dim() == 2:
+            embedding = embedding.squeeze(0)
+
+        self.buffer[self.head] = embedding
+
+        if timestamp is not None:
+            self.timestamps[self.head] = timestamp
+
+        self.head = (self.head + 1) % self.capacity
+        self.count += 1
+
+    def get_sequence(self, seq_length: int) -> torch.Tensor:
+        """
+        Get last seq_length embeddings without adding new ones.
+
+        Returns:
+            (seq_length, emb_dim) on GPU
+        """
+        if self.count == 0:
+            return torch.zeros(seq_length, self.emb_dim, device=self.device)
+
+        valid = min(self.count, seq_length)
+        padding = seq_length - valid
+
+        if self.head >= valid:
+            indices = torch.arange(self.head - valid, self.head, device=self.device)
+        else:
+            indices = torch.cat([
+                torch.arange(self.capacity - (valid - self.head), self.capacity, device=self.device),
+                torch.arange(0, self.head, device=self.device)
+            ])
+
+        result = self.buffer[indices]
+        if padding > 0:
+            result = torch.cat([
+                torch.zeros(padding, self.emb_dim, device=self.device),
+                result
+            ], dim=0)
+        return result
 
     def invalidate(self):
-        """Clear cache (e.g., on round restart or game state change)."""
+        """Clear cache (e.g., on round restart)."""
         self.head = 0
         self.count = 0
         self.buffer.zero_()
         self.timestamps.fill(0)
-
         if self.frame_hashes is not None:
             self.frame_hashes.fill(0)
 
     def get_stats(self) -> dict:
-        """Get cache statistics."""
         return {
             "capacity": self.capacity,
             "count": self.count,
@@ -211,27 +203,18 @@ class GPUEmbeddingCache:
         }
 
     def _hash_frame(self, frame: torch.Tensor) -> np.uint64:
-        """
-        Hash frame for validation (optional).
-
-        Simple hash using mean and std to detect frame changes.
-        """
         mean = frame.mean().item()
         std = frame.std().item()
-        # Combine into uint64 hash
         hash_val = int((mean * 1e6 + std * 1e6)) % (2**64)
         return np.uint64(hash_val)
 
 
 class AudioEmbeddingCache:
     """
-    Cache for audio embeddings to avoid re-encoding.
+    Cache for stereo audio embeddings to avoid re-encoding.
 
-    Unlike radar/scene which have per-frame caching, audio uses
-    a different strategy:
-    - Audio encoder processes full 30-sec window → 60 embeddings
-    - Each embedding represents 0.5 sec (8000 samples @ 16kHz)
-    - Re-encode only when 0.5 sec of new audio data accumulated
+    StereoAudioEncoder processes full 16-sec stereo window → 32 embeddings → linspace 16.
+    Re-encode only when 0.5 sec of new audio data accumulated (8000 samples per channel).
     """
 
     def __init__(
@@ -240,18 +223,11 @@ class AudioEmbeddingCache:
         sample_rate: int = 16000,
         device: str = 'cuda'
     ):
-        """
-        Args:
-            embedding_duration_ms: Duration per embedding (default 500ms)
-            sample_rate: Audio sample rate (default 16kHz)
-            device: GPU device
-        """
-        self.cached_embeddings: Optional[torch.Tensor] = None  # (1, 60, 512)
+        self.cached_embeddings: Optional[torch.Tensor] = None  # (1, 16, 512) after linspace
         self.last_encoded_position = 0
-        self.embedding_step_samples = int(embedding_duration_ms / 1000 * sample_rate)  # 8000 samples
+        self.embedding_step_samples = int(embedding_duration_ms / 1000 * sample_rate)  # 8000
         self.device = device
 
-        # Statistics
         self.cache_hits = 0
         self.cache_misses = 0
 
@@ -259,44 +235,51 @@ class AudioEmbeddingCache:
         self,
         audio_tensor: torch.Tensor,
         current_position: int,
-        encoder: Callable[[torch.Tensor], torch.Tensor]
+        encoder: Callable[[torch.Tensor], torch.Tensor],
+        preprocessor=None,
     ) -> torch.Tensor:
         """
         Get audio embeddings, using cache if possible.
 
         Args:
-            audio_tensor: (1, 480000) audio samples (30 sec @ 16kHz)
+            audio_tensor: (1, 2, 256000) stereo audio
             current_position: Current sample position in audio stream
-            encoder: AudioEncoder model
+            encoder: StereoAudioEncoder model
+            preprocessor: Preprocessor with encode_audio() for linspace
 
         Returns:
-            embeddings: (1, 60, 512) audio embeddings
+            embeddings: (1, 16, 512) audio embeddings (linspaced from 32)
         """
         samples_since_encode = current_position - self.last_encoded_position
 
-        # Cache hit: less than 0.5 sec of new data
         if samples_since_encode < self.embedding_step_samples and self.cached_embeddings is not None:
             self.cache_hits += 1
             return self.cached_embeddings
 
-        # Cache miss - re-encode full buffer
         self.cache_misses += 1
 
         with torch.no_grad():
-            embeddings = encoder(audio_tensor)  # (1, 60, 512)
+            raw_embeds = encoder(audio_tensor)  # (1, 32, 512)
 
-        self.cached_embeddings = embeddings
+        # Linspace 32 → 16
+        if raw_embeds.shape[1] > 16:
+            import torch.nn.functional as F
+            embeds = raw_embeds.permute(0, 2, 1)  # (1, 512, 32)
+            embeds = F.interpolate(embeds, size=16, mode='linear', align_corners=True)
+            embeds = embeds.permute(0, 2, 1)  # (1, 16, 512)
+        else:
+            embeds = raw_embeds
+
+        self.cached_embeddings = embeds
         self.last_encoded_position = current_position
 
-        return embeddings
+        return embeds
 
     def invalidate(self):
-        """Clear cache."""
         self.cached_embeddings = None
         self.last_encoded_position = 0
 
     def get_stats(self) -> dict:
-        """Get cache statistics."""
         total_requests = self.cache_hits + self.cache_misses
         hit_rate = self.cache_hits / total_requests if total_requests > 0 else 0.0
 
@@ -304,5 +287,5 @@ class AudioEmbeddingCache:
             "cache_hits": self.cache_hits,
             "cache_misses": self.cache_misses,
             "hit_rate": hit_rate,
-            "memory_mb": 0.12 if self.cached_embeddings is not None else 0.0,  # 60 * 512 * 4 bytes
+            "memory_mb": 0.03 if self.cached_embeddings is not None else 0.0,  # 16*512*4 bytes
         }

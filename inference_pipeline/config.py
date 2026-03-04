@@ -1,5 +1,11 @@
 """
 Configuration constants for the CS2 VLA Agent inference pipeline.
+
+Aligned with final_model/ architecture:
+  - TemporalCrossTransformer: d_model=384, depth=4
+  - StereoAudioEncoder: 16 sec stereo, 32 embeddings → linspace 16
+  - YOLO l-scale: scene_dim=512, nc=2
+  - State vector: 100 dim (12 scalars + 2 side + 43 weapon + 43 weapon_list)
 """
 
 from dataclasses import dataclass, field
@@ -16,11 +22,11 @@ class Config:
     device: str = "cuda"
 
     # === Checkpoint ===
-    checkpoint_path: str = "./checkpoints2/run_xxx/epoch_10.pth"
+    checkpoint_path: str = "./checkpoints_final/latest/epoch_best.pth"
 
     # === Screen capture ===
     screen_width: int = 640
-    screen_height: int = 480
+    screen_height: int = 640   # square — YOLO expects 640×640
     capture_fps: int = 60
     monitor_index: int = 1  # Primary monitor
 
@@ -30,15 +36,14 @@ class Config:
     radar_size: Tuple[int, int] = (224, 224)  # Resize target
 
     # === Buffer sizes ===
-    scene_buffer_size: int = 16  # Number of scene frames to keep
-    # NOTE: 129 frames causes ~2 FPS. Use 32 for ~8 FPS or 16 for ~16 FPS
-    radar_buffer_size: int = 32  # Number of radar frames to keep (reduced for perf)
+    scene_buffer_size: int = 64  # 64 scene frames (~4 sec @ 16 FPS) → passed to transformer
+    radar_buffer_size: int = 32  # 32 radar frames (@1Hz) → linspace to 16 in cache
     state_buffer_size: int = 16  # Number of game states to keep
 
     # === Audio settings ===
     audio_sample_rate: int = 16000  # Hz
-    audio_buffer_duration: float = 30.0  # seconds
-    audio_channels: int = 1  # mono
+    audio_buffer_duration: float = 16.0  # seconds (StereoAudioEncoder expects 16 sec)
+    audio_channels: int = 2  # stereo — CS2 HRTF spatial audio
 
     # === Mouse control ===
     mouse_sensitivity: float = 1.0  # Multiplier for mouse delta
@@ -67,18 +72,16 @@ class Config:
     buy_model_path: str = "./buy_models/buy_predictor_v1"
 
     # === Paths ===
-    src_path: Optional[Path] = None
-    audio_src_path: Optional[Path] = None
+    final_model_path: Optional[Path] = None
 
     def __post_init__(self):
         """Set derived paths."""
         base = Path(__file__).parent.parent
-        self.src_path = base / "src"
-        self.audio_src_path = base / "audio_adaptation" / "src"
+        self.final_model_path = base / "final_model"
 
 
 # Key mapping: model output index -> key name
-# Based on DatasetIntent.py action encoding
+# Matches DatasetIntent.py intent vector (20 dims)
 ACTION_KEYS: Dict[int, str] = {
     0: "mouse1",      # fire
     1: "mouse2",      # second_fire (scope/alt fire)
@@ -139,24 +142,25 @@ SCAN_CODES: Dict[str, int] = {
 }
 
 
-# Model dimensions (from CLAUDE.md)
+# Model dimensions (aligned with final_model/ architecture)
 MODEL_DIMS = {
     "radar_dim": 512,
-    "radar_seq": 32,  # Reduced from 129 for inference performance
-    "scene_dim": 2048,
-    "scene_seq": 16,
+    "radar_seq": 16,       # 32 raw → linspace 16 → encode → (16, 512)
+    "scene_dim": 512,      # YOLO embed_from_features → 512 (NOT 2048)
+    "scene_seq": 64,       # 64 raw → ModalityCompressor 64→16 in transformer
     "audio_dim": 512,
-    "audio_seq": 60,
+    "audio_seq": 16,       # StereoAudioEncoder→32 → linspace→16
     "detection_dim": 100,  # 20 detections * 5 features
-    "detection_seq": 1,
-    "actions_dim": 22,  # 2 mouse + 20 keys
-    "actions_seq": 16,
-    "state_dim": 95,  # 9 scalars + 2 side + 42 weapon + 42 weapon_list
-    "d_model": 512,
+    "detection_seq": 16,   # 16 tokens (already linspaced)
+    "actions_dim": 22,     # 2 mouse + 20 keys
+    "actions_seq": 64,     # 64 raw → ModalityCompressor 64→16 in transformer
+    "state_dim": 100,      # 12 scalars + 2 side + 43 weapon + 43 weapon_list
+    "d_model": 384,        # transformer hidden dim
 }
 
 
-# State vector indices (95 total)
+# State vector indices (100 total)
+# 12 scalars + 2 side + 43 weapon + 43 weapon_list = 100
 STATE_INDICES = {
     "hp": 0,
     "armor": 1,
@@ -167,7 +171,24 @@ STATE_INDICES = {
     "round_time_left": 6,
     "bomb_planted": 7,
     "freeze_time": 8,
-    "side_start": 9,      # 2 one-hot
-    "weapon_start": 11,   # 42 one-hot
-    "weapon_list_start": 53,  # 42 multi-hot
+    "defuser": 9,
+    "score_ct": 10,
+    "score_t": 11,
+    "side_start": 12,          # 2 one-hot [CT, T]
+    "weapon_start": 14,        # 43 one-hot
+    "weapon_list_start": 57,   # 43 multi-hot
 }
+
+
+# Weapon list (43 items, matches DatasetIntent.py)
+WEAPONS = [
+    'p2000', 'usp-s', 'p250', 'five-seven', 'glock-18', 'tec-9',
+    'cz75-auto', 'dual berettas', 'desert eagle', 'm249',
+    'r8 revolver', 'mp9', 'mac-10', 'pp-bizon', 'mp7',
+    'ump-45', 'p90', 'mp5-sd', 'famas', 'galil ar', 'sawed-off',
+    'm4a4', 'm4a1-s', 'ak-47', 'aug', 'sg 553', 'ssg 08',
+    'awp', 'scar-20', 'g3sg1', 'nova', 'xm1014', 'mag-7',
+    'negev', 'knife', 'high explosive grenade', 'flashbang',
+    'smoke grenade', 'decoy grenade', 'molotov',
+    'incendiary grenade', 'c4 explosive', 'None'
+]

@@ -599,13 +599,16 @@ class FeatureCache:
         self.misses += 1
         return None
 
-    def put(self, key: str, value: torch.Tensor):
+    def put(self, key: str, value):
         if key in self._cache:
             self._cache.move_to_end(key)
         else:
             if len(self._cache) >= self.max_size:
                 self._cache.popitem(last=False)
-            self._cache[key] = value.detach().half().cpu()
+            if isinstance(value, tuple):
+                self._cache[key] = tuple(v.detach().half().cpu() for v in value)
+            else:
+                self._cache[key] = value.detach().half().cpu()
 
     @property
     def hit_rate(self) -> float:

@@ -214,7 +214,7 @@ class TRTYOLOEmbed:
             x: (B, 3, H, W) input tensor
 
         Returns:
-            (B, 2048) embeddings
+            (B, 512) embeddings
         """
         return self.engine(x)
 
@@ -245,12 +245,12 @@ class TRTAudioEncoder:
         Forward pass.
 
         Args:
-            x: (B, 480000) audio waveform
+            x: (B, 2, 256000) stereo audio waveform (16 sec @ 16kHz)
 
         Returns:
-            (B, 60, 512) audio embeddings
+            (B, 32, 512) audio embeddings (raw StereoAudioEncoder output)
         """
-        # TRT engine outputs (B, 60, 512) directly
+        # TRT engine outputs (B, 32, 512) directly
         return self.engine(x)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -353,12 +353,12 @@ class TRTTemporalFlow:
         Forward pass through TRT engine.
 
         Args:
-            radar_seq: (B, T_radar, 512)
-            scene_seq: (B, T_scene, 2048)
-            detection_seq: (B, 1, 100)
-            action_seq: (B, 16, 22)
-            state_vec: (B, 95)
-            audio_seq: (B, 60, 512) or None
+            radar_seq: (B, 16, 512)
+            scene_seq: (B, 64, 512)
+            detection_seq: (B, 16, 100)
+            action_seq: (B, 64, 22)
+            state_vec: (B, 100)
+            audio_seq: (B, 16, 512) or None
 
         Returns:
             policy_mouse: (B, 2)

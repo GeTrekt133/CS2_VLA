@@ -11,7 +11,7 @@ Input formats (raw → transformer):
   audio_seq:     (B, 16, 512)   ← optional, 32 raw → linspace 16     → 16 tokens
   detection_seq: (B, 16, 100)   ← 64 raw → linspace 16               → 16 tokens
   action_seq:    (B, 64, 22)    ← 64 raw @~16Hz → cross-attn 64→16  → 16 tokens
-  state_vec:     (B, 95)                                              →  1 token
+  state_vec:     (B, 100)                                             →  1 token
 
 Context after compression + concatenation:
   (B, 81, 384) with audio:    16+16+16+16+16+1 = 81
@@ -191,7 +191,7 @@ class TemporalCrossTransformer(nn.Module):
         audio_seq:     (B, 16, audio_dim=512)   — optional, 16 tokens
         detection_seq: (B, 16, detection_dim=100) — 16 tokens (already linspaced)
         action_seq:    (B, 64, actions_dim=22)  — 64 tokens → compressed to 16
-        state_vec:     (B, state_dim=95)        — 1 token
+        state_vec:     (B, state_dim=100)       — 1 token
 
     After compression: 16+16+16+16+16+1 = 81 tokens (with audio), 65 without.
 
@@ -208,7 +208,7 @@ class TemporalCrossTransformer(nn.Module):
         scene_dim: int = 512,
         detection_dim: int = 100,
         actions_dim: int = 22,
-        state_dim: int = 95,
+        state_dim: int = 100,
         # Audio
         audio_dim: int = 512,
         use_audio: bool = True,
@@ -271,15 +271,15 @@ class TemporalCrossTransformer(nn.Module):
                 dim_feedforward=d_model * ff_mult,  # 384*4=1536
                 batch_first=True,
                 dropout=dropout,
-                norm_first=False
+                norm_first=True
             ),
             num_layers=depth
         )
 
         # Register tokens for 3 output heads
-        self.register_tokens_policy_mouse = nn.Parameter(torch.randn(1, 1, d_model))
-        self.register_tokens_policy_keys = nn.Parameter(torch.randn(1, 1, d_model))
-        self.register_tokens_value = nn.Parameter(torch.randn(1, 1, d_model))
+        self.register_tokens_policy_mouse = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
+        self.register_tokens_policy_keys = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
+        self.register_tokens_value = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
 
         # Cross-attention: 3 register tokens attend to unified context
         self.cross_attn = CrossAttentionBlock(d_model, num_heads=num_heads,
@@ -314,7 +314,7 @@ class TemporalCrossTransformer(nn.Module):
             scene_seq:     (B, 64, 512)  — compressed 64→16 via ModalityCompressor
             detection_seq: (B, 16, 100)
             action_seq:    (B, 64, 22)   — compressed 64→16 via ModalityCompressor
-            state_vec:     (B, 95)
+            state_vec:     (B, 100)
             audio_seq:     (B, 16, 512) or None
 
         Returns:
@@ -402,7 +402,7 @@ if __name__ == "__main__":
     audio   = torch.randn(B, 16, 512).to(device)   # 16 tokens
     det     = torch.randn(B, 16, 100).to(device)   # 16 tokens
     actions = torch.randn(B, 64, 22).to(device)    # 64 tokens → compressed to 16
-    state   = torch.randn(B, 95).to(device)
+    state   = torch.randn(B, 100).to(device)
     gt_mouse = torch.randn(B, 2).to(device)
 
     mouse_embed, policy_keys, value = model(radar, scene, det, actions, state, audio)

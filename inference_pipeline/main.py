@@ -2,9 +2,14 @@
 Main entry point for the CS2 VLA Agent inference pipeline.
 
 Usage:
-    python -m inference_pipeline.main --checkpoint ./checkpoints2/run_xxx/epoch_10.pth
-    python -m inference_pipeline.main --checkpoint ./checkpoints2/run_xxx/epoch_10.pth --use-audio --use-buy
-    python -m inference_pipeline.main --checkpoint ./checkpoints2/run_xxx/epoch_10.pth --no-actions  # Observation mode
+    python -m inference_pipeline.main --checkpoint ./checkpoints_final/run_xxx/epoch_best.pth
+    python -m inference_pipeline.main --checkpoint ... --use-audio --no-actions
+    python -m inference_pipeline.main --checkpoint ... --write-gsi-cfg   # write CS2 GSI cfg file
+
+GSI (Game State Integration):
+    The agent uses CS2's GSI to receive game state (HP, weapons, score, etc.).
+    Start the server automatically; CS2 must have gamestate_integration_cs2nn.cfg
+    in its cfg/ folder. Run with --write-gsi-cfg to create it.
 """
 
 import sys
@@ -30,10 +35,10 @@ from .actions.mouse_controller import MouseController
 from .actions.keyboard_controller import KeyboardController
 from .overlay.debug_overlay import DebugOverlay
 from .buy.buy_executor import BuyExecutor, SimpleBuyExecutor
+from .gsi.gsi_server import GSIServer, create_gsi_cfg
 
 
 def parse_args():
-    """Parse command line arguments."""
     parser = argparse.ArgumentParser(
         description="CS2 VLA Agent Inference Pipeline",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
@@ -48,100 +53,46 @@ def parse_args():
     )
 
     # Device
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="cuda",
-        help="Compute device (cuda/cpu)"
-    )
+    parser.add_argument("--device", type=str, default="cuda", help="Compute device (cuda/cpu)")
 
     # Features
-    parser.add_argument(
-        "--use-audio",
-        action="store_true",
-        help="Enable audio encoder"
-    )
+    parser.add_argument("--use-audio", action="store_true", help="Enable stereo audio encoder")
+    parser.add_argument("--use-buy", action="store_true", help="Enable automatic buy system")
+    parser.add_argument("--use-trt", action="store_true", help="Use TensorRT FP16 engines")
+    parser.add_argument("--trt-dir", type=str, default="./trt_engines", help="TensorRT engines directory")
+    parser.add_argument("--no-overlay", action="store_true", help="Disable debug overlay")
+    parser.add_argument("--no-actions", action="store_true", help="Observation mode (no inputs sent)")
+    parser.add_argument("--no-gsi", action="store_true", help="Disable GSI server (no game state)")
 
+    # GSI
+    parser.add_argument("--gsi-port", type=int, default=3000, help="GSI server port")
+    parser.add_argument("--gsi-host", type=str, default="127.0.0.1", help="GSI server host")
     parser.add_argument(
-        "--use-buy",
+        "--write-gsi-cfg",
         action="store_true",
-        help="Enable automatic buy system"
+        help="Write gamestate_integration_cs2nn.cfg to CS2 cfg folder and exit"
     )
-
     parser.add_argument(
-        "--use-trt",
-        action="store_true",
-        help="Use TensorRT FP16 engines for faster inference (requires conversion)"
-    )
-
-    parser.add_argument(
-        "--trt-dir",
+        "--gsi-cfg-path",
         type=str,
-        default="./trt_engines",
-        help="Directory containing TensorRT engines"
-    )
-
-    parser.add_argument(
-        "--no-overlay",
-        action="store_true",
-        help="Disable debug overlay"
-    )
-
-    parser.add_argument(
-        "--no-actions",
-        action="store_true",
-        help="Observation mode - don't send mouse/keyboard inputs"
+        default=None,
+        help="Custom path for CS2 GSI config file (used with --write-gsi-cfg)"
     )
 
     # Tuning
-    parser.add_argument(
-        "--sensitivity",
-        type=float,
-        default=1.0,
-        help="Mouse sensitivity multiplier"
-    )
-
-    parser.add_argument(
-        "--key-threshold",
-        type=float,
-        default=0.5,
-        help="Key press probability threshold"
-    )
-
-    parser.add_argument(
-        "--inference-rate",
-        type=int,
-        default=16,
-        help="Target inference rate (Hz)"
-    )
+    parser.add_argument("--sensitivity", type=float, default=1.0, help="Mouse sensitivity multiplier")
+    parser.add_argument("--key-threshold", type=float, default=0.5, help="Key press probability threshold")
+    parser.add_argument("--inference-rate", type=int, default=16, help="Target inference rate (Hz)")
 
     # Screen capture
-    parser.add_argument(
-        "--monitor",
-        type=int,
-        default=1,
-        help="Monitor index to capture (1 = primary)"
-    )
-
-    parser.add_argument(
-        "--screen-width",
-        type=int,
-        default=640,
-        help="Capture width"
-    )
-
-    parser.add_argument(
-        "--screen-height",
-        type=int,
-        default=480,
-        help="Capture height"
-    )
+    parser.add_argument("--monitor", type=int, default=1, help="Monitor index (1=primary)")
+    parser.add_argument("--screen-width", type=int, default=640, help="Capture width (YOLO: 640)")
+    parser.add_argument("--screen-height", type=int, default=640, help="Capture height (YOLO: 640)")
 
     return parser.parse_args()
 
 
 def create_config(args) -> Config:
-    """Create config from arguments."""
     config = Config()
 
     config.checkpoint_path = args.checkpoint
@@ -161,11 +112,13 @@ def create_config(args) -> Config:
     config.screen_width = args.screen_width
     config.screen_height = args.screen_height
 
+    config.gsi_host = args.gsi_host
+    config.gsi_port = args.gsi_port
+
     return config
 
 
 def print_banner():
-    """Print startup banner."""
     banner = """
     ╔═══════════════════════════════════════════════════════╗
     ║           CS2 VLA Agent - Inference Pipeline          ║
@@ -177,48 +130,62 @@ def print_banner():
 
 
 def print_config(config: Config, args):
-    """Print configuration summary."""
     print("\n[Configuration]")
     print(f"  Checkpoint: {config.checkpoint_path}")
     print(f"  Device: {config.device}")
     print(f"  Inference rate: {config.inference_rate} Hz")
     print(f"  Screen: {config.screen_width}x{config.screen_height} (monitor {config.monitor_index})")
     print(f"\n[Features]")
-    print(f"  Audio encoder: {'Enabled' if config.use_audio else 'Disabled'}")
+    print(f"  Audio encoder: {'Enabled (stereo 16sec)' if config.use_audio else 'Disabled'}")
     print(f"  TensorRT FP16: {'Enabled' if config.use_trt else 'Disabled'}")
     if config.use_trt:
         print(f"    TRT engines: {config.trt_dir}")
     print(f"  Auto-buy: {'Enabled' if config.use_buy else 'Disabled'}")
     print(f"  Debug overlay: {'Enabled' if config.use_overlay else 'Disabled'}")
     print(f"  Apply actions: {'Enabled' if config.apply_actions else 'DISABLED (observation mode)'}")
+    print(f"  GSI server: {'Disabled (--no-gsi)' if args.no_gsi else f'http://{config.gsi_host}:{config.gsi_port}'}")
     print(f"\n[Tuning]")
     print(f"  Mouse sensitivity: {config.mouse_sensitivity}")
     print(f"  Key threshold: {config.key_threshold}")
 
 
 def main():
-    """Main entry point."""
     print_banner()
 
-    # Parse arguments
     args = parse_args()
 
-    # Verify checkpoint exists
+    # Handle --write-gsi-cfg
+    if args.write_gsi_cfg:
+        gsi_path = args.gsi_cfg_path
+        if gsi_path is None:
+            gsi_path = (
+                r"C:\Program Files (x86)\Steam\steamapps\common"
+                r"\Counter-Strike Global Offensive\game\csgo\cfg"
+                r"\gamestate_integration_cs2nn.cfg"
+            )
+        create_gsi_cfg(
+            output_path=gsi_path,
+            host=args.gsi_host,
+            port=args.gsi_port,
+            auth_token=Config().gsi_auth_token,
+        )
+        print("\nDone. Restart CS2 for the config to take effect.")
+        print("Then run the agent normally (without --write-gsi-cfg).")
+        return
+
+    # Verify checkpoint
     if not Path(args.checkpoint).exists():
         print(f"\nERROR: Checkpoint not found: {args.checkpoint}")
         sys.exit(1)
 
-    # Create config
     config = create_config(args)
     print_config(config, args)
 
     # Create components
     print("\n[Initializing components...]")
 
-    # Input sender
     input_sender = InputSender()
 
-    # Controllers
     mouse_controller = MouseController(
         input_sender=input_sender,
         sensitivity=config.mouse_sensitivity,
@@ -231,14 +198,12 @@ def main():
         threshold=config.key_threshold,
     )
 
-    # Overlay
     overlay = None
     if config.use_overlay:
         overlay = DebugOverlay()
         overlay.start()
         print("  Debug overlay started")
 
-    # Buy executor
     buy_executor = None
     if config.use_buy:
         buy_executor = BuyExecutor(
@@ -248,7 +213,6 @@ def main():
         if buy_executor.is_available:
             print("  Buy executor loaded")
         else:
-            print("  Buy executor not available (model not found)")
             buy_executor = SimpleBuyExecutor(input_sender)
             print("  Using simple rule-based buy executor")
 
@@ -262,24 +226,32 @@ def main():
         use_buy=config.use_buy,
     )
 
-    # Attach components
     engine.set_mouse_controller(mouse_controller)
     engine.set_keyboard_controller(keyboard_controller)
     engine.set_overlay(overlay)
     if buy_executor:
         engine.set_buy_executor(buy_executor)
 
+    # Start GSI server
+    gsi_server = None
+    if not args.no_gsi:
+        gsi_server = GSIServer(
+            host=config.gsi_host,
+            port=config.gsi_port,
+            auth_token=config.gsi_auth_token,
+            callback=engine.update_game_state,
+        )
+        gsi_server.start()
+
     # Shutdown flag
     shutdown_event = threading.Event()
 
-    # Handle shutdown
     def signal_handler(sig, frame):
         print("\n\n[Shutdown signal received]")
         shutdown_event.set()
 
     signal.signal(signal.SIGINT, signal_handler)
 
-    # Global hotkey (works even when game is in focus)
     if HAS_KEYBOARD:
         def on_hotkey():
             print("\n\n[Global hotkey pressed - Ctrl+Shift+Q]")
@@ -294,37 +266,49 @@ def main():
 
         print("\n" + "=" * 55)
         print("  Agent is running!")
+        if gsi_server:
+            print(f"  GSI: http://{config.gsi_host}:{config.gsi_port}")
+            print(f"  Run with --write-gsi-cfg to create CS2 config file")
         print("  Press Ctrl+Shift+Q (in-game) or Ctrl+C (terminal) to stop")
         print("=" * 55)
 
         if not config.apply_actions:
             print("\n  NOTE: Running in OBSERVATION MODE - no inputs sent")
 
-        # Main loop - wait for shutdown signal
+        if gsi_server:
+            print("\n  Tip: If GSI state is not updating, run:")
+            print(f"    python -m inference_pipeline.main --checkpoint ... --write-gsi-cfg")
+
+        # Main loop
         while engine.is_running and not shutdown_event.is_set():
             time.sleep(0.1)
+
+            # Log GSI status every 30 sec
+            if gsi_server and engine._inference_count % (30 * config.inference_rate) == 0 and engine._inference_count > 0:
+                secs = gsi_server.seconds_since_update()
+                if secs > 5:
+                    print(f"[WARNING] No GSI update for {secs:.0f}s — game state may be stale")
 
     except KeyboardInterrupt:
         print("\n\n[Interrupted by user]")
 
     finally:
-        # Cleanup
         print("\n[Cleaning up...]")
         engine.stop()
+
+        if gsi_server:
+            gsi_server.stop()
 
         if overlay:
             overlay.stop()
 
-        # Release all keys
         keyboard_controller.release_all()
 
-        # Unhook keyboard
         if HAS_KEYBOARD:
             keyboard.unhook_all()
 
         print("[Agent stopped]")
 
-        # Force exit to kill any remaining threads
         time.sleep(0.5)
         os._exit(0)
 

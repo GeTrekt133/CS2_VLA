@@ -13,8 +13,7 @@ from typing import Optional
 
 # Add paths
 base_path = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(base_path / "src"))
-sys.path.insert(0, str(base_path / "audio_adaptation" / "src"))
+sys.path.insert(0, str(base_path / "final_model"))
 sys.path.insert(0, str(base_path / "inference_pipeline"))
 
 
@@ -125,9 +124,9 @@ def test_yolo_embed_trt(trt_dir: str, checkpoint_path: Optional[str] = None):
     from Yolo import DetectionModel
     from tensorrt.trt_wrapper import TRTYOLOEmbed
 
-    # Load PyTorch YOLO
-    yolo_cfg = base_path / "src" / "yolo11n.yaml"
-    pytorch_model = DetectionModel(cfg=str(yolo_cfg), ch=3, nc=80).cuda().eval()
+    # Load PyTorch YOLO — final_model: yolo11l, nc=2
+    yolo_cfg = base_path / "final_model" / "yolo11.yaml"
+    pytorch_model = DetectionModel(cfg=str(yolo_cfg), ch=3, nc=2, scale='l').cuda().eval()
 
     if checkpoint_path:
         checkpoint = torch.load(checkpoint_path, map_location='cuda', weights_only=False)
@@ -145,15 +144,16 @@ def test_yolo_embed_trt(trt_dir: str, checkpoint_path: Optional[str] = None):
     trt_model = TRTYOLOEmbed(str(trt_path), device='cuda')
     print("✅ Loaded TRT engine")
 
-    # Test input
-    test_input = torch.randn(1, 3, 480, 640, device='cuda')
+    # Test input — square 640×640 for YOLOv11l
+    test_input = torch.randn(1, 3, 640, 640, device='cuda')
 
-    # PyTorch inference
+    # PyTorch inference via extract_features + embed_from_features
     with torch.no_grad():
-        pytorch_out = pytorch_model.embeds(test_input)  # (1, 2048)
+        p3, p5 = pytorch_model.extract_features(test_input)
+        pytorch_out = pytorch_model.embed_from_features(p3, p5)  # (1, 512)
 
     # TRT inference
-    trt_out = trt_model(test_input)  # (1, 2048)
+    trt_out = trt_model(test_input)  # (1, 512)
 
     # Compare
     max_diff = (pytorch_out - trt_out).abs().max().item()
@@ -174,7 +174,8 @@ def test_yolo_embed_trt(trt_dir: str, checkpoint_path: Optional[str] = None):
 
     for _ in range(10):
         with torch.no_grad():
-            _ = pytorch_model.embeds(test_input)
+            p3, p5 = pytorch_model.extract_features(test_input)
+            _ = pytorch_model.embed_from_features(p3, p5)
         _ = trt_model(test_input)
 
     torch.cuda.synchronize()
@@ -184,7 +185,8 @@ def test_yolo_embed_trt(trt_dir: str, checkpoint_path: Optional[str] = None):
         torch.cuda.synchronize()
         start = time.time()
         with torch.no_grad():
-            _ = pytorch_model.embeds(test_input)
+            p3, p5 = pytorch_model.extract_features(test_input)
+            _ = pytorch_model.embed_from_features(p3, p5)
         torch.cuda.synchronize()
         times_pytorch.append(time.time() - start)
 
@@ -212,20 +214,18 @@ def test_audio_encoder_trt(trt_dir: str, checkpoint_path: Optional[str] = None):
     print("\n=== Test: AudioEncoder TRT ===")
 
     try:
-        from AudioEncoder import AudioEncoder
+        from AudioEncoder import StereoAudioEncoder
         from tensorrt.trt_wrapper import TRTAudioEncoder
     except ImportError:
-        print("⚠️  AudioEncoder not available, skipping test")
+        print("⚠️  StereoAudioEncoder not available, skipping test")
         return True
 
-    # Load PyTorch model
-    pytorch_model = AudioEncoder(
+    # Load PyTorch StereoAudioEncoder
+    pytorch_model = StereoAudioEncoder(
         sample_rate=16000,
-        n_mels=64,
+        n_mels=128,
         embed_dim=512,
-        target_embeddings=60,
-        dropout=0.1,
-        pool_type='avg'
+        target_embeddings=32
     ).cuda().eval()
 
     if checkpoint_path:
@@ -244,15 +244,15 @@ def test_audio_encoder_trt(trt_dir: str, checkpoint_path: Optional[str] = None):
     trt_model = TRTAudioEncoder(str(trt_path), device='cuda')
     print("✅ Loaded TRT engine")
 
-    # Test input
-    test_input = torch.randn(1, 480000, device='cuda')
+    # Test input — stereo 16 sec @ 16kHz
+    test_input = torch.randn(1, 2, 256000, device='cuda')
 
     # PyTorch inference
     with torch.no_grad():
-        pytorch_out = pytorch_model(test_input)  # (1, 60, 512)
+        pytorch_out = pytorch_model(test_input)  # (1, 32, 512)
 
     # TRT inference
-    trt_out = trt_model(test_input)  # (1, 60, 512)
+    trt_out = trt_model(test_input)  # (1, 32, 512)
 
     # Compare
     max_diff = (pytorch_out - trt_out).abs().max().item()
@@ -279,7 +279,7 @@ def test_audio_encoder_trt(trt_dir: str, checkpoint_path: Optional[str] = None):
     torch.cuda.synchronize()
 
     times_pytorch = []
-    for _ in range(50):  # Fewer iterations (audio is slower)
+    for _ in range(50):  # Fewer iterations (audio encoder is slower)
         torch.cuda.synchronize()
         start = time.time()
         with torch.no_grad():
@@ -317,31 +317,11 @@ def test_temporal_flow_trt(trt_dir: str, checkpoint_path: Optional[str] = None, 
         print(f"⚠️  TemporalTransformer not available: {e}")
         return True
 
-    # Load PyTorch models
-    if use_audio:
-        temporal_model = TemporalCrossTransformer(
-            radar_dim=512, radar_seq=129,
-            scene_dim=2048, scene_seq=16,
-            audio_dim=512, audio_seq=60,
-            detection_dim=100, detection_seq=1,
-            actions_dim=22, actions_seq=16,
-            state_dim=95,
-            d_model=512, num_heads=8, depth=6, audio_depth=2,
-            use_audio=True
-        ).cuda().eval()
-    else:
-        temporal_model = TemporalCrossTransformer(
-            radar_dim=512, radar_seq=129,
-            scene_dim=2048, scene_seq=16,
-            detection_dim=100, detection_seq=1,
-            actions_dim=22, actions_seq=16,
-            state_dim=95,
-            d_model=512, num_heads=8, depth=6,
-            use_audio=False
-        ).cuda().eval()
+    # Load PyTorch models using final_model/ defaults
+    temporal_model = TemporalCrossTransformer(use_audio=use_audio).cuda().eval()
 
     flow_head = FlowActionHead(
-        context_dim=512,
+        context_dim=384,  # must match d_model=384
         action_dim=2,
         hidden_dim=256,
         noise_scale=0.3,
@@ -371,13 +351,13 @@ def test_temporal_flow_trt(trt_dir: str, checkpoint_path: Optional[str] = None, 
     trt_model = TRTTemporalFlow(str(trt_path), device='cuda', use_audio=use_audio)
     print("✅ Loaded TRT engine")
 
-    # Test inputs
-    radar_seq = torch.randn(1, 129, 512, device='cuda')
-    scene_seq = torch.randn(1, 16, 2048, device='cuda')
-    detection_seq = torch.randn(1, 1, 100, device='cuda')
-    action_seq = torch.randn(1, 16, 22, device='cuda')
-    state_vec = torch.randn(1, 95, device='cuda')
-    audio_seq = torch.randn(1, 60, 512, device='cuda') if use_audio else None
+    # Test inputs matching final_model/ architecture
+    radar_seq = torch.randn(1, 16, 512, device='cuda')
+    scene_seq = torch.randn(1, 64, 512, device='cuda')
+    detection_seq = torch.randn(1, 16, 100, device='cuda')
+    action_seq = torch.randn(1, 64, 22, device='cuda')
+    state_vec = torch.randn(1, 100, device='cuda')
+    audio_seq = torch.randn(1, 16, 512, device='cuda') if use_audio else None
 
     # PyTorch inference
     with torch.no_grad():

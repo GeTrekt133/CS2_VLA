@@ -16,8 +16,7 @@ import subprocess
 
 # Add paths
 base_path = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(base_path / "src"))
-sys.path.insert(0, str(base_path / "audio_adaptation" / "src"))
+sys.path.insert(0, str(base_path / "final_model"))
 
 
 def check_cuda():
@@ -267,7 +266,7 @@ def check_model_imports():
 
     # Optional imports
     optional_modules = [
-        ('AudioEncoder', 'AudioEncoder'),
+        ('AudioEncoder', 'StereoAudioEncoder'),
     ]
 
     print("\n   Optional components:")
