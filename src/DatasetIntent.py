@@ -120,6 +120,7 @@ class CSRoundDataset(Dataset):
                 vec[self.KEYS.index(k)] = 1.0
         return vec
 
+
     def _encode_weapon(self, weapon):
         vec = np.zeros(len(self.WEAPONS), dtype=np.float32)
         w = weapon.lower()
@@ -206,7 +207,6 @@ class CSRoundDataset(Dataset):
 
         scene_seq = torch.tensor(np.stack(scene_frames), dtype=torch.float32)
 
-
         # =====================================================
         # 3️⃣ RADAR (фиксированное окно, КАК БЫЛО)
         # =====================================================
@@ -258,9 +258,9 @@ class CSRoundDataset(Dataset):
         intent_keys_hist = []
 
         for k in range(self.actions_window):
-            end = i - k * T
+            end = i - (k + 1) * T  # Сдвиг на 1 окно назад, чтобы не включать текущее окно (таргет)
             start = max(0, end - T + 1)
-            if start > end:
+            if end < 0:
                 break
 
             # объединяем нажатия мыши и клавиш в окне T
@@ -286,35 +286,39 @@ class CSRoundDataset(Dataset):
             window_intent = {}
 
             # движение и основные действия
-            window_intent["fire"] = 1.0 if "MOUSE_LEFT" in st["keys"] else 0.0
-            window_intent["second_fire"] = 1.0 if "MOUSE_RIGHT" in st["keys"] else 0.0
+            window_intent["fire"] = 1.0 if "MOUSE_LEFT" in keys_window else 0.0
+            window_intent["second_fire"] = 1.0 if "MOUSE_RIGHT" in keys_window else 0.0
 
-            window_intent["forward"] = 1.0 if "W" in st["keys"] else 0.0
-            window_intent["back"] = 1.0 if "S" in st["keys"] else 0.0
+            window_intent["forward"] = 1.0 if "W" in keys_window else 0.0
+            window_intent["back"] = 1.0 if "S" in keys_window else 0.0
 
             # strafe → LEFT / RIGHT (бинарные)
-            window_intent["left"] = 1.0 if ("A" in st["keys"] and "D" not in st["keys"]) else 0.0
-            window_intent["right"] = 1.0 if ("D" in st["keys"] and "A" not in st["keys"]) else 0.0
+            window_intent["left"] = 1.0 if ("A" in keys_window and "D" not in keys_window) else 0.0
+            window_intent["right"] = 1.0 if ("D" in keys_window and "A" not in keys_window) else 0.0
 
-            window_intent["jump"] = 1.0 if "SPACE" in st["keys"] else 0.0
-            window_intent["crouch"] = 1.0 if "CTRL" in st["keys"] else 0.0
-            window_intent["shift"] = 1.0 if "SHIFT" in st["keys"] else 0.0
+            window_intent["jump"] = 1.0 if "SPACE" in keys_window else 0.0
+            window_intent["crouch"] = 1.0 if "CTRL" in keys_window else 0.0
+            window_intent["shift"] = 1.0 if "SHIFT" in keys_window else 0.0
 
             for key in ["WEAPON1", "WEAPON2", "WEAPON3", "C4", "R"]:
-                window_intent[key.lower()] = 1.0 if key in st["keys"] else 0.0
+                window_intent[key.lower()] = 1.0 if key in keys_window else 0.0
 
             for key in ["HE", "MOLOTOV", "SMOKE", "FLASH", "DECOY"]:
-                window_intent[key.lower()] = 1.0 if key in st["keys"] else 0.0
+                window_intent[key.lower()] = 1.0 if key in keys_window else 0.0
 
-            window_intent["use"] = 1.0 if "E" in st["keys"] else 0.0
+            window_intent["use"] = 1.0 if "E" in keys_window else 0.0
 
             # конвертируем в тензор
             intent_keys_hist.append(torch.tensor(list(window_intent.values()), dtype=torch.float32))
             intent_mouse_hist.append(torch.tensor(mouse_intent, dtype=torch.float32))
 
-        # дополняем нулями, если истории меньше actions_window
+        # дополняем нулями, если истории меньше actions_window (особенно в начале раунда)
+        num_intent_keys = 20  # Количество клавиш в intent
         while len(intent_keys_hist) < self.actions_window:
-            intent_keys_hist.append(torch.zeros_like(intent_keys_hist[0]))
+            if len(intent_keys_hist) > 0:
+                intent_keys_hist.append(torch.zeros_like(intent_keys_hist[0]))
+            else:
+                intent_keys_hist.append(torch.zeros(num_intent_keys, dtype=torch.float32))
         while len(intent_mouse_hist) < self.actions_window:
             intent_mouse_hist.append(torch.zeros(2, dtype=torch.float32))
 
@@ -325,36 +329,38 @@ class CSRoundDataset(Dataset):
         # =====================================================
         # 5️⃣ INTENT (агрегация по окну T)
         # =====================================================
-        st = states[i]
+        # Собираем все нажатия клавиш за окно [t_start, i]
+        target_keys_window = set()
+        for j in range(t_start, i + 1):
+            target_keys_window.update(states[j]["keys"])
+
         intent = {}
 
         # движение и основные действия
-        intent["fire"] = 1.0 if "MOUSE_LEFT" in st["keys"] else 0.0
-        intent["second_fire"] = 1.0 if "MOUSE_RIGHT" in st["keys"] else 0.0
+        intent["fire"] = 1.0 if "MOUSE_LEFT" in target_keys_window else 0.0
+        intent["second_fire"] = 1.0 if "MOUSE_RIGHT" in target_keys_window else 0.0
 
-        intent["forward"] = 1.0 if "W" in st["keys"] else 0.0
-        intent["back"] = 1.0 if "S" in st["keys"] else 0.0
+        intent["forward"] = 1.0 if "W" in target_keys_window else 0.0
+        intent["back"] = 1.0 if "S" in target_keys_window else 0.0
 
         # strafe → LEFT / RIGHT (бинарные)
-        intent["left"] = 1.0 if ("A" in st["keys"] and "D" not in st["keys"]) else 0.0
-        intent["right"] = 1.0 if ("D" in st["keys"] and "A" not in st["keys"]) else 0.0
+        intent["left"] = 1.0 if ("A" in target_keys_window and "D" not in target_keys_window) else 0.0
+        intent["right"] = 1.0 if ("D" in target_keys_window and "A" not in target_keys_window) else 0.0
 
-        intent["jump"] = 1.0 if "SPACE" in st["keys"] else 0.0
-        intent["crouch"] = 1.0 if "CTRL" in st["keys"] else 0.0
-        intent["shift"] = 1.0 if "SHIFT" in st["keys"] else 0.0
+        intent["jump"] = 1.0 if "SPACE" in target_keys_window else 0.0
+        intent["crouch"] = 1.0 if "CTRL" in target_keys_window else 0.0
+        intent["shift"] = 1.0 if "SHIFT" in target_keys_window else 0.0
 
         for key in ["WEAPON1", "WEAPON2", "WEAPON3", "C4", "R"]:
-            intent[key.lower()] = 1.0 if key in st["keys"] else 0.0
+            intent[key.lower()] = 1.0 if key in target_keys_window else 0.0
 
         for key in ["HE", "MOLOTOV", "SMOKE", "FLASH", "DECOY"]:
-            intent[key.lower()] = 1.0 if key in st["keys"] else 0.0
+            intent[key.lower()] = 1.0 if key in target_keys_window else 0.0
 
-        intent["use"] = 1.0 if "E" in st["keys"] else 0.0
+        intent["use"] = 1.0 if "E" in target_keys_window else 0.0
 
         # вектор таргета
         intent_vec = torch.tensor(list(intent.values()), dtype=torch.float32)
-
-
 
         # =====================================================
         # 6️⃣ TARGET: DELTA YAW / PITCH ПО ОКНУ T

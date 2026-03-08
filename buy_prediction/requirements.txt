@@ -1,0 +1,6 @@
+# Buy Prediction Module Dependencies
+demoparser2
+pandas
+numpy
+lightgbm
+scikit-learn

@@ -34,10 +34,10 @@ class CrossAttentionBlock(nn.Module):
 
 class TemporalCrossTransformer(nn.Module):
     def __init__(self,
-                 radar_dim=512, radar_seq=192,
+                 radar_dim=512, radar_seq=129,
                  scene_dim=2048, scene_seq=16,
                  detection_dim=100, detection_seq=1,
-                 actions_dim=22, actions_seq=192, #actions_dim=24
+                 actions_dim=22, actions_seq=16,
                  state_dim=95,
                  d_model=512, num_heads=8, depth=6,
                  ff_mult=4, dropout=0.1):
@@ -139,7 +139,6 @@ class TemporalCrossTransformer(nn.Module):
         value = self.value_head(value_embed)
 
         return policy_mouse, policy_keys, value
-
 
 
 if __name__ == "__main__":
