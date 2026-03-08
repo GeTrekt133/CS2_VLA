@@ -145,33 +145,62 @@ class CSRoundDataset(Dataset):
                     if os.path.exists(f):
                         round_audio_path = f
 
+                start_tick = rnd.get('start_tick',
+                                     rnd['states'][0]['tick'] if rnd['states'] else 0)
+                end_tick = rnd.get('end_tick',
+                                   rnd['states'][-1]['tick'] if rnd['states'] else start_tick)
+                drift_ticks = rnd.get('drift_info', {}).get('drift_ticks', 0)
+
                 self.metadata.append({
                     'game_id': game_id,
                     'round_id': rnd['round_id'],
                     'demo_path': demo_path,
                     'audio_path': round_audio_path,
-                    'start_tick': rnd.get('start_tick',
-                                          rnd['states'][0]['tick'] if rnd['states'] else 0),
+                    'start_tick': start_tick,
+                    'end_tick': end_tick,
+                    'drift_ticks': drift_ticks,
                     'states': rnd['states'],
                 })
 
+    MIN_FRAMES_PER_ROUND = 2000
+
+    def _count_round_frames(self, item: Dict) -> int:
+        """Count how many frame files actually exist for this round."""
+        states = item['states']
+        if not states:
+            return 0
+        # Sample every 4th tick to avoid slow full scan (approximate count only)
+        count = 0
+        for idx in range(0, len(states), 4):
+            tick = states[idx]['tick']
+            if os.path.exists(self._frame_path(item['demo_path'], tick)):
+                count += 1
+        return count * 4  # approximate total
+
     def _build_samples_index(self):
+        skipped_rounds = 0
         for item in self.metadata:
+            frame_count = self._count_round_frames(item)
+            if frame_count < self.MIN_FRAMES_PER_ROUND:
+                skipped_rounds += 1
+                continue
             states = item['states']
             for i in range(len(states)):
-                if i % 4 == 0:
-                    self.samples.append({
+                self.samples.append({
                         'game_id': item['game_id'],
                         'round_id': item['round_id'],
                         'demo_path': item['demo_path'],
                         'audio_path': item['audio_path'],
                         'start_tick': item['start_tick'],
+                        'end_tick': item['end_tick'],
+                        'drift_ticks': item['drift_ticks'],
                         'states': states,
                         'tick_idx': i,
                     })
 
         audio_count = sum(1 for s in self.samples if s['audio_path'] is not None)
-        print(f"[INFO] {len(self.samples)} samples ({audio_count} with audio)")
+        print(f"[INFO] {len(self.samples)} samples ({audio_count} with audio), "
+              f"{skipped_rounds} rounds skipped (< {self.MIN_FRAMES_PER_ROUND} frames)")
 
     def __len__(self):
         return len(self.samples)
@@ -179,6 +208,13 @@ class CSRoundDataset(Dataset):
     # ------------------------------------------------------------------ #
     # Frame helpers                                                        #
     # ------------------------------------------------------------------ #
+
+    def _apply_drift(self, tick: int, start_tick: int, end_tick: int, drift_ticks: int) -> int:
+        """Linear drift correction: 0 at round start, drift_ticks at round end."""
+        if drift_ticks == 0:
+            return tick
+        progress = (tick - start_tick) / max(1, end_tick - start_tick)
+        return tick + round(progress * drift_ticks)
 
     def _frame_path(self, demo_path: str, tick: int) -> str:
         return os.path.join(demo_path, f"tick_{tick}.jpg")
@@ -325,19 +361,42 @@ class CSRoundDataset(Dataset):
         states = sample['states']
         demo_path = sample['demo_path']
         i = sample['tick_idx']
+        start_tick  = sample['start_tick']
+        end_tick    = sample['end_tick']
+        drift_ticks = sample['drift_ticks']
 
         T = self._compute_T(idx)
         t_start = max(0, i - T + 1)
+
+        def frame_path(tick: int) -> str:
+            t = self._apply_drift(tick, start_tick, end_tick, drift_ticks)
+            return self._frame_path(demo_path, t)
 
         # ---- SCENE: up to scene_window raw frames → 64 tokens ----
         raw_scene_indices = list(range(max(0, i - (self.scene_window - 1) * T), i + 1, T))
         chosen_scene = self._linspace_indices(len(raw_scene_indices), target=SCENE_SEQ_LEN)
 
         scene_paths = []
+        _last_scene_path: Optional[str] = None
+        _scene_fallback = 0
+        _scene_black = 0
         for k in chosen_scene:
             j = raw_scene_indices[k]
             tick = states[j]['tick']
-            scene_paths.append(self._frame_path(demo_path, tick))
+            p = frame_path(tick)
+            if os.path.exists(p):
+                _last_scene_path = p
+                scene_paths.append(p)
+            elif _last_scene_path is not None:
+                scene_paths.append(_last_scene_path)  # repeat last valid
+                _scene_fallback += 1
+            else:
+                scene_paths.append(p)  # black frame (no valid frame seen yet)
+                _scene_black += 1
+        if _scene_fallback or _scene_black:
+            print(f"[WARN] scene missing frames — "
+                  f"fallback={_scene_fallback}, black={_scene_black} "
+                  f"| {sample['game_id']} round={sample['round_id']} tick={states[i]['tick']}")
 
         # ---- RADAR: up to radar_window raw frames @1Hz ----
         raw_radar_indices = list(range(max(0, i - self.radar_window * 64 + 1), i + 1, 64))
@@ -351,7 +410,7 @@ class CSRoundDataset(Dataset):
         for k in chosen_radar:
             j = raw_radar_indices[k]
             tick = states[j]['tick']
-            path = self._frame_path(demo_path, tick)
+            path = frame_path(tick)
             radar_paths.append(path)
             img = self._load_image(path)
             if img is None:

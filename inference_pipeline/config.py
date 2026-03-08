@@ -18,16 +18,14 @@ class Config:
     """Main configuration for the inference pipeline."""
 
     # === Inference settings ===
-    inference_rate: int = 16  # Hz (inferences per second)
     device: str = "cuda"
 
     # === Checkpoint ===
     checkpoint_path: str = "./checkpoints_final/latest/epoch_best.pth"
 
-    # === Screen capture ===
+    # === Screen capture (synchronous, no FPS target) ===
     screen_width: int = 640
     screen_height: int = 640   # square — YOLO expects 640×640
-    capture_fps: int = 60
     monitor_index: int = 1  # Primary monitor
 
     # === Radar crop (from full screenshot) ===
@@ -39,6 +37,10 @@ class Config:
     scene_buffer_size: int = 64  # 64 scene frames (~4 sec @ 16 FPS) → passed to transformer
     radar_buffer_size: int = 32  # 32 radar frames (@1Hz) → linspace to 16 in cache
     state_buffer_size: int = 16  # Number of game states to keep
+
+    # === Modality rates ===
+    radar_rate: float = 1.0    # Hz — encode radar every 1 sec
+    audio_rate: float = 2.0    # Hz — encode new 0.5 sec audio chunk every 0.5 sec
 
     # === Audio settings ===
     audio_sample_rate: int = 16000  # Hz
@@ -69,7 +71,11 @@ class Config:
     trt_dir: str = "./trt_engines"  # Directory containing .trt engine files
 
     # === Buy agent ===
-    buy_model_path: str = "./buy_models/buy_predictor_v1"
+    buy_model_path: str = "./buy_models/buy_v2"
+
+    # === Alive digit detector (MNIST-like CNN for alive counts) ===
+    alive_digit_model_path: str = "./alive_digit/best.pt"
+    alive_digit_rate: float = 2.0  # Hz — run detector every 0.5s
 
     # === Paths ===
     final_model_path: Optional[Path] = None

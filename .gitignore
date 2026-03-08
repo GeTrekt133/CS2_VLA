@@ -1,29 +1,96 @@
+# ========== Python ==========
+*__pycache__*
+*.pyc
+*.pyo
+
+# ========== Model weights ==========
 yolo11*
 yolo12*
 yolov8*
-train_dataset.json
-val_dataset.json
-checkpoints
-data
-dataset
-demo_frames
-frames
-frames2
-maps_cords
-mnist
-parse_rambler
-radar_dataset_mirage
-runs
-data.json
+*.pt
+*.pth
+*.onnx
+
+# ========== Data & datasets ==========
+data/
+dataset/
+frames/
+frames2/
+demo_frames/
+radar_dataset_mirage/
+mnist/
 *.csv
-cluster_embeddings.py
-query_embeddings.py
-*bbox*
+*.xlsx
+*.json
+*.jsonl
+*.npz
+
+# ========== Training artifacts ==========
+checkpoints/
+checkpoints_*/
+runs/
+*.zip
+
+# ========== Legacy / unrelated ==========
+parse_rambler/
+maps_cords/
+milvus_matching/
 detect/screenshots/
 detect/comparison_output/
-*lgb
-*json
 detect/test_output/
 detect/viz*
-*__pycache__*
+image_parse/
+gsi/
+templates/
+debug/
+src/
+buy_models/
+
+# ========== Analysis / one-off scripts (not VLA training) ==========
+analyze_ar_coverage.py
+analyze_violations.py
+bbox_markup.py
+cluster_embeddings.py
+query_embeddings.py
+query_matching.py
+query_matching_milvus.py
+upload_to_milvus.py
+merge_experiments.py
+merge_results.py
+visualize_comparison.py
+score_round.py
+time_round.py
+count_params.py
+count_params_full.py
+verify_statistics.py
+video2frames2.py
+clutch.py
+demo_parser.py
+detection.py
+keys.py
+unzip.py
+tmp.py
+tmp2.py
+run_optimization_tests.bat
+run_optimization_tests.sh
+debug_checkpoint.py
+
+# ========== Docs not related to VLA ==========
+DISTRIBUTION_ANALYSIS.md
+IMPLEMENTATION_SUMMARY.md
+MERGE_LOGIC.md
+PERCEPTION_ANALYSIS_CORRECTED.md
+PERCEPTION_VS_CONTROL_ANALYSIS.md
+README_MERGE.md
+VIOLATIONS_ANALYSIS.md
+
+# ========== Images / misc ==========
+*bbox*
+*.png
+*.jpg
 nul
+*.log
+
+# ========== Workflow files ==========
+*.workflow.json
+My workflow*.json

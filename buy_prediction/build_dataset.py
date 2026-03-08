@@ -1,76 +1,54 @@
 """
 Build buy prediction dataset from CS2 demo files.
-"""
-import os
-import sys
-from pathlib import Path
 
-# Add parent to path for imports
-sys.path.insert(0, str(Path(__file__).parent))
+Usage:
+    python build_dataset.py --demos D:/DemosCS --out ./data
+"""
+import argparse
+from pathlib import Path
 
 from demo_parser import parse_multiple_demos
 from features import prepare_dataset
-import pandas as pd
 
 
-# CS2 demos folder
-DEMOS_DIR = r"C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive\game\csgo"
-OUTPUT_DIR = Path(__file__).parent / "data"
-
-
-def find_all_demos(demos_dir: str) -> list:
-    """Find all .dem files in directory."""
-    demos_path = Path(demos_dir)
-    demos = list(demos_path.glob("*.dem"))
-    print(f"Found {len(demos)} demo files")
-    return [str(d) for d in demos]
-
-
-def build_dataset():
-    """Build and save the buy prediction dataset."""
-    OUTPUT_DIR.mkdir(exist_ok=True)
+def build_dataset(demos_dir: str, out_dir: str):
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
 
     # Find demos
-    demo_paths = find_all_demos(DEMOS_DIR)
-
-    if not demo_paths:
-        print("No demo files found!")
+    demos = sorted(Path(demos_dir).glob("*.dem"))
+    print(f"Found {len(demos)} demo files in {demos_dir}")
+    if not demos:
         return
 
-    # Parse demos
-    print(f"\nParsing {len(demo_paths)} demos...")
-    raw_data = parse_multiple_demos(
-        demo_paths,
-        output_path=str(OUTPUT_DIR / "raw_buy_data.csv")
+    # Parse
+    raw = parse_multiple_demos(
+        [str(d) for d in demos],
+        output_path=str(out / "raw_data.csv"),
     )
-
-    if len(raw_data) == 0:
-        print("No data extracted!")
+    if len(raw) == 0:
+        print("No data extracted")
         return
 
-    print(f"\nExtracted {len(raw_data)} player-round samples")
+    # Features + targets
+    features, targets = prepare_dataset(raw)
+    features.to_csv(out / "features.csv", index=False)
+    targets.to_csv(out / "targets.csv", index=False)
 
-    # Engineer features
-    print("\nEngineering features...")
-    features, targets = prepare_dataset(raw_data)
-
-    # Save as CSV
-    features.to_csv(OUTPUT_DIR / "features.csv", index=False)
-    targets.to_csv(OUTPUT_DIR / "targets.csv", index=False)
-
-    print(f"\nDataset saved to {OUTPUT_DIR}")
-    print(f"  Features: {features.shape}")
-    print(f"  Targets: {targets.shape}")
-
-    # Stats
-    print(f"\nBuy type distribution:")
-    print(targets['buy_type'].value_counts())
-
-    print(f"\nFeature statistics:")
-    print(features[['money', 'team_money_avg', 'round_num', 'score_diff']].describe())
-
-    return features, targets
+    print(f"\nDataset: {len(features)} samples")
+    print(f"Features: {features.shape[1]} cols")
+    print(f"\nPrimary weapon distribution:")
+    print(targets['primary'].value_counts().sort_index())
+    print(f"\nArmor distribution:")
+    print(targets['armor'].value_counts().sort_index())
+    print(f"\nGrenade rates:")
+    for col in ['buy_smoke', 'buy_flash', 'buy_he', 'buy_molotov', 'buy_defuser']:
+        print(f"  {col}: {targets[col].mean():.3f}")
 
 
 if __name__ == "__main__":
-    build_dataset()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--demos', default='D:/DemosCS')
+    parser.add_argument('--out', default='./data')
+    args = parser.parse_args()
+    build_dataset(args.demos, args.out)

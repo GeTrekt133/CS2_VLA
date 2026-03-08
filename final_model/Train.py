@@ -32,6 +32,7 @@ Loss:
 import os
 import cv2
 import json
+import math
 import torch
 import random
 import numpy as np
@@ -44,11 +45,10 @@ from tqdm import tqdm
 from datetime import datetime
 from typing import Optional, Dict, List, Tuple, Any
 from contextlib import nullcontext
-from collections import OrderedDict
 
 from DatasetIntent import CSRoundDataset, SEQ_LEN, SCENE_SEQ_LEN, ACTION_SEQ_LEN
 from RadarEncoder import RadarEncoderEffB0
-from Yolo import DetectionModel, Detect, load_pretrained_weights, FeatureCache
+from Yolo import DetectionModel, Detect, load_pretrained_weights
 from TemporalTransformer import TemporalCrossTransformer, FlowActionHead
 from AudioEncoder import StereoAudioEncoder
 
@@ -82,6 +82,50 @@ def seed_everything(seed: int):
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+
+def compute_key_pos_weights(dataset_json: str, key_names: list, device,
+                             max_weight: float = 50.0) -> torch.Tensor:
+    """Compute per-class pos_weight = neg_count / pos_count, capped at max_weight."""
+    _SIMPLE = {
+        'fire': 'MOUSE_LEFT', 'second_fire': 'MOUSE_RIGHT',
+        'forward': 'W', 'back': 'S',
+        'jump': 'SPACE', 'crouch': 'CTRL', 'shift': 'SHIFT',
+        'weapon1': 'WEAPON1', 'weapon2': 'WEAPON2', 'weapon3': 'WEAPON3',
+        'c4': 'C4', 'reload': 'R', 'use': 'E',
+        'he': 'HE', 'molotov': 'MOLOTOV', 'smoke': 'SMOKE',
+        'flash': 'FLASH', 'decoy': 'DECOY',
+    }
+    with open(dataset_json) as f:
+        data = json.load(f)
+    total = 0
+    pos_counts = {k: 0 for k in key_names}
+    for demo in data['demos']:
+        for rnd in demo['rounds']:
+            for state in rnd['states']:
+                total += 1
+                keys_set = set(state['keys'])
+                for k in key_names:
+                    if k == 'left':
+                        if 'A' in keys_set and 'D' not in keys_set:
+                            pos_counts[k] += 1
+                    elif k == 'right':
+                        if 'D' in keys_set and 'A' not in keys_set:
+                            pos_counts[k] += 1
+                    elif _SIMPLE[k] in keys_set:
+                        pos_counts[k] += 1
+    weights = []
+    for k in key_names:
+        pos = max(pos_counts[k], 1)
+        raw = (total - pos) / pos
+        weights.append(min(raw, max_weight))
+    w = torch.tensor(weights, dtype=torch.float32, device=device)
+    print(f'[pos_weight] cap={max_weight}')
+    for k, cw, pos in zip(key_names, weights, [pos_counts[kn] for kn in key_names]):
+        raw = (total - max(pos, 1)) / max(pos, 1)
+        tag = ' CAPPED' if raw > max_weight else ''
+        print(f'  {k:>12}: w={cw:>6.1f}  support={pos:>6,}{tag}')
+    return w
 
 
 def log_metrics(text: str, save_file: str):
@@ -200,15 +244,10 @@ def build_detection_sequence(
     det_raw_window: int = 64,
     img_size: int = 640,
     nc: int = 2,
-    det_cache=None,
 ) -> torch.Tensor:
     """
-    Build detection sequence (B, seq_len, max_det*5) by:
-    1. Computing 64 raw ticks for each batch item (stride=T from dataset)
-    2. Loading/caching detection vector for each tick
-    3. Linspace 64 → seq_len
-
-    Zero-pads for ticks before round start.
+    Build detection sequence (B, seq_len, max_det*5).
+    Linspaces 64 raw ticks (stride=T) → seq_len. Zero-pads missing frames.
     """
     B = len(batch['game_id'])
     indices = list(np.linspace(0, det_raw_window - 1, seq_len, dtype=int))
@@ -219,9 +258,8 @@ def build_detection_sequence(
         T_val = int(batch['T'][b])
         demo_path = batch['demo_path'][b]
 
-        # Build raw 64 ticks using stride=T (synced with scene/action from DatasetIntent)
         ticks = [current_tick - (det_raw_window - 1 - j) * T_val for j in range(det_raw_window)]
-        sampled_ticks = [ticks[k] for k in indices]  # 16 ticks
+        sampled_ticks = [ticks[k] for k in indices]
 
         det_seq = []
         for tick in sampled_ticks:
@@ -232,20 +270,9 @@ def build_detection_sequence(
             if not os.path.exists(frame_path):
                 det_seq.append(torch.zeros(max_det * 5, device=device))
                 continue
+            det_seq.append(get_det_vector(frame_path, yolo, device, max_det, img_size, nc))
 
-            # Check cache
-            if det_cache is not None:
-                cached = det_cache.get(frame_path)
-                if cached is not None:
-                    det_seq.append(cached.to(device).float())
-                    continue
-
-            det_vec = get_det_vector(frame_path, yolo, device, max_det, img_size, nc)
-            if det_cache is not None:
-                det_cache.put(frame_path, det_vec)
-            det_seq.append(det_vec)
-
-        all_det_seqs.append(torch.stack(det_seq).unsqueeze(0))  # (1, 16, max_det*5)
+        all_det_seqs.append(torch.stack(det_seq).unsqueeze(0))
 
     return torch.cat(all_det_seqs)  # (B, 16, max_det*5)
 
@@ -255,14 +282,10 @@ def build_scene_embeddings(
     yolo: DetectionModel,
     device: str,
     img_size: int = 640,
-    feat_cache=None,
 ) -> torch.Tensor:
     """
     Build scene embeddings (B, seq_len, 512) from P3 + P5 backbone features.
-
-    scene_frame_paths in batch is already linspaced in DatasetIntent.
-    P3/P5 features are extracted without grad (backbone is frozen) and cached.
-    embeds_* heads run WITH grad for end-to-end scene embedding training.
+    Backbone runs under no_grad (frozen); embed head runs with grad (trainable).
     """
     B = len(batch['scene_frame_paths'])
     seq_len = len(batch['scene_frame_paths'][0])
@@ -270,39 +293,10 @@ def build_scene_embeddings(
     all_embeds = []
     for t in range(seq_len):
         frame_paths_t = [batch['scene_frame_paths'][b][t] for b in range(B)]
-
-        p3_list, p5_list = [], []
-        uncached_paths, uncached_indices = [], []
-
-        for idx, path in enumerate(frame_paths_t):
-            cached = feat_cache.get(path) if feat_cache is not None else None
-            if cached is not None:
-                p3_val, p5_val = cached
-                p3_list.append(p3_val.to(device).float().unsqueeze(0))
-                p5_list.append(p5_val.to(device).float().unsqueeze(0))
-            else:
-                uncached_paths.append(path)
-                uncached_indices.append(idx)
-                p3_list.append(None)
-                p5_list.append(None)
-
-        # Run backbone only for uncached frames
-        if uncached_paths:
-            imgs = torch.stack([load_image_tensor(p, img_size) for p in uncached_paths]).to(device)
-            p3_new, p5_new = yolo.extract_features(imgs)
-            for i, ui in enumerate(uncached_indices):
-                p3_f = p3_new[i]
-                p5_f = p5_new[i]
-                p3_list[ui] = p3_f.unsqueeze(0)
-                p5_list[ui] = p5_f.unsqueeze(0)
-                if feat_cache is not None:
-                    feat_cache.put(uncached_paths[i], (p3_f, p5_f))
-
-        p3 = torch.cat(p3_list)  # (B, p3_ch, 80, 80)
-        p5 = torch.cat(p5_list)  # (B, p5_ch, 20, 20)
-
-        # Embed head runs WITH grad (trainable)
-        embed = yolo.embed_from_features(p3, p5)   # (B, 512)
+        imgs = torch.stack([load_image_tensor(p, img_size) for p in frame_paths_t]).to(device)
+        with torch.no_grad():
+            p3, p5 = yolo.extract_features(imgs)
+        embed = yolo.embed_from_features(p3.float(), p5.float())  # (B, 512), with grad
         all_embeds.append(embed)
 
     return torch.stack(all_embeds, dim=1)  # (B, seq_len, 512)
@@ -343,8 +337,7 @@ def evaluate(
     log_dir: str,
     img_size: int = 640,
     nc: int = 2,
-    feat_cache=None,
-    det_cache=None,
+    max_batches: int = 0,
 ):
     radar_encoder.eval()
     yolo.eval()
@@ -358,21 +351,20 @@ def evaluate(
     mse_fn = nn.MSELoss()
 
     use_amp = (str(device).startswith('cuda'))
+    n_batches = 0
     with torch.no_grad():
-        for batch in tqdm(val_loader, desc='  Validation', leave=False):
+        for batch in tqdm(val_loader, desc='  Validation', leave=False,
+                          total=max_batches if max_batches > 0 else None):
             if batch is None:
                 continue
+            if max_batches > 0 and n_batches >= max_batches:
+                break
+            n_batches += 1
 
-            # Scene embeddings (cached backbone)
-            scene_embeds = build_scene_embeddings(batch, yolo, device, img_size, feat_cache)
-
-            # Radar embeddings
+            scene_embeds = build_scene_embeddings(batch, yolo, device, img_size)
             radar_embeds = build_radar_embeddings(batch, radar_encoder, device)
-
-            # Detection sequence (cached)
             detect_embeds = build_detection_sequence(
                 batch, yolo, device, max_det=max_det, nc=nc, img_size=img_size,
-                det_cache=det_cache,
             )  # (B, 16, 100)
 
             # Actions (B, 64, 22) — compressed 64→16 inside TemporalCrossTransformer
@@ -417,10 +409,14 @@ def evaluate(
             all_preds_keys.append(preds_keys)
             all_labels_keys.append(gt_keys.cpu().numpy())
 
-    n = max(len(val_loader), 1)
+    n = max(len(all_preds_keys), 1)
     avg_loss = total_loss / n
     avg_mse = total_mse / n
     avg_flow = total_flow / n
+
+    if not all_preds_keys:
+        print('[Evaluate] No valid batches in val_loader — skipping metrics')
+        return float('inf')
 
     all_preds = np.concatenate(all_preds_keys, axis=0)
     all_labels = np.concatenate(all_labels_keys, axis=0)
@@ -441,7 +437,7 @@ def evaluate(
     print(log_text)
 
     per_class = compute_per_class_metrics(all_labels, all_preds)
-    per_class_file = os.path.join(log_dir, f'per_class_val_epoch_{epoch+1}.json')
+    per_class_file = os.path.join(log_dir, f'per_class_val_step_{epoch}.json')
     with open(per_class_file, 'w') as f:
         json.dump(per_class, f, indent=2)
 
@@ -459,23 +455,28 @@ def train():
     CKPT_ROOT = './checkpoints_final'
 
     # Paths — update to your environment
-    TRAIN_DATASET_JSON = '/mnt/ml/cs2_data/server_dataset_train.json'
-    VAL_DATASET_JSON   = '/mnt/ml/cs2_data/server_dataset_val.json'
-    AUDIO_DIR = None   # audio is inside demo folders (round_*.wav), no separate dir needed
-    PRETRAINED_YOLO = None    # e.g. '/path/to/yolo11l_best.pt' from detect/train_yolo.py
-    RESUME_CKPT = None        # e.g. '/path/to/epoch_5.pth' to resume training
+    TRAIN_DATASET_JSON = '/mnt/ml/msirotkin/shock2/final_dataset_train_clean.json'
+    VAL_DATASET_JSON   = '/mnt/ml/msirotkin/shock2/final_dataset_val_clean.json'
+    AUDIO_DIR          = '/data/msirotkin/audio'
+    PRETRAINED_YOLO    = '/mnt/ml/msirotkin/shock2/final_model/yolo11l.pt'
+    RESUME_CKPT        = '/mnt/ml/msirotkin/shock2/final_model/checkpoints_final/run_2026-03-05_23-30-37/checkpoints/step_30000.pth'
 
-    BATCH_SIZE = 8    # A100 40GB: safe starting point; try 16 if memory allows
-    NUM_EPOCHS = 50
-    MAX_DET = 20
-    LR = 1e-4
-    W_KEYS = 100
-    SEED = 42
-    IMG_SIZE = 640
-    NC = 2            # detection classes (body, head)
-    USE_AUDIO = True
+    BATCH_SIZE     = 4
+    NUM_EPOCHS     = 50
+    EVAL_EVERY     = 10000  # run validation every N steps (within epoch)
+    CKPT_EVERY     = 10000  # save checkpoint every N steps
+    MAX_DET        = 20
+    LR             = 1e-4
+    W_KEYS         = 1.0    # pos_weight handles class imbalance; overall scale stays 1
+    WARMUP_STEPS   = 1000   # linear warmup 0 → LR
+    COSINE_PERIOD  = 100_000  # cosine decay period (~1 epoch)
+    MIN_LR_RATIO   = 0.1    # floor: LR * MIN_LR_RATIO
+    SEED           = 42
+    IMG_SIZE    = 640
+    NC          = 1      # detection classes (body only)
+    USE_AUDIO   = True
     NOISE_SCALE = 0.3
-    FLOW_STEPS = 5
+    FLOW_STEPS  = 5
 
     CKPT_DIR = os.path.join(CKPT_ROOT, RUN_NAME, 'checkpoints')
     LOG_DIR = os.path.join(CKPT_ROOT, RUN_NAME, 'logs')
@@ -556,7 +557,7 @@ def train():
     print(f'YOLO total: {total_yolo:,}  |  embeds (trainable): {embed_params:,}')
 
     # Audio encoder — StereoAudioEncoder (MobileNetV3-Large, mn10_as compatible)
-    PRETRAINED_AUDIO = None   # set to path of mn10_as.pt for AudioSet pretraining
+    PRETRAINED_AUDIO = '/mnt/ml/msirotkin/shock2/final_model/mn10_as.pt'
     audio_encoder = None
     if USE_AUDIO:
         audio_encoder = StereoAudioEncoder(embed_dim=512, target_embeddings=32).to(device)
@@ -622,7 +623,9 @@ def train():
     n_gpus = torch.cuda.device_count()
     print(f'Training on {device} ({n_gpus} GPU(s) detected, using 1)')
 
-    bce_loss = nn.BCEWithLogitsLoss()
+    print('Computing per-class key pos_weights...')
+    key_pos_weight = compute_key_pos_weights(TRAIN_DATASET_JSON, KEY_NAMES, device)
+    bce_loss = nn.BCEWithLogitsLoss(pos_weight=key_pos_weight)
 
     params = (
         list(radar_encoder.parameters()) +
@@ -637,15 +640,40 @@ def train():
     if checkpoint and 'optimizer' in checkpoint:
         optimizer.load_state_dict(checkpoint['optimizer'])
 
-    start_epoch = checkpoint.get('epoch', 0) if checkpoint else 0
-    best_val_loss = float('inf')
+    def _lr_lambda(step: int) -> float:
+        if step < WARMUP_STEPS:
+            return step / max(1, WARMUP_STEPS)
+        progress = (step - WARMUP_STEPS) / max(1, COSINE_PERIOD - WARMUP_STEPS)
+        cosine = 0.5 * (1 + math.cos(math.pi * min(progress, 1.0)))
+        return max(MIN_LR_RATIO, cosine)
 
-    # ======== BACKBONE CACHES ========
-    feat_cache = FeatureCache(max_size=5000)   # P3+P5 features (float16, CPU)
-    det_cache = FeatureCache(max_size=5000)    # detection vectors
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, _lr_lambda)
+    if checkpoint and 'scheduler' in checkpoint:
+        scheduler.load_state_dict(checkpoint['scheduler'])
+
+    start_epoch = checkpoint.get('epoch', 0) if checkpoint else 0
+    global_step = checkpoint.get('global_step', 0) if checkpoint else 0
+    best_val_loss = float('inf')
 
     # ======== AMP ========
     scaler = torch.amp.GradScaler() if str(device).startswith('cuda') else None
+
+    def _save_checkpoint(step, epoch, avg_train, avg_val):
+        ckpt_data = {
+            'epoch': epoch,
+            'global_step': step,
+            'radar_encoder': radar_encoder.state_dict(),
+            'yolo': yolo.state_dict(),
+            'temporal_model': temporal_model.state_dict(),
+            'flow_head': flow_head.state_dict(),
+            'optimizer': optimizer.state_dict(),
+            'scheduler': scheduler.state_dict(),
+            'train_loss': avg_train,
+            'val_loss': avg_val,
+        }
+        if audio_encoder:
+            ckpt_data['audio_encoder'] = audio_encoder.state_dict()
+        return ckpt_data
 
     # ======== TRAINING LOOP ========
     for epoch in range(start_epoch, NUM_EPOCHS):
@@ -665,29 +693,20 @@ def train():
                 continue
             torch.cuda.empty_cache()
 
-            # Scene embeddings (cached backbone, trainable embed head)
-            scene_embeds = build_scene_embeddings(batch, yolo, device, IMG_SIZE, feat_cache)
-
-            # Radar embeddings
-            radar_embeds = build_radar_embeddings(batch, radar_encoder, device)
-
-            # Detection sequence (cached)
+            scene_embeds  = build_scene_embeddings(batch, yolo, device, IMG_SIZE)
+            radar_embeds  = build_radar_embeddings(batch, radar_encoder, device)
             detect_embeds = build_detection_sequence(
-                batch, yolo, device,
-                max_det=MAX_DET, nc=NC, img_size=IMG_SIZE,
-                det_cache=det_cache,
+                batch, yolo, device, max_det=MAX_DET, nc=NC, img_size=IMG_SIZE,
             )  # (B, 16, 100)
 
-            # Actions (B, 64, 22) from DatasetIntent — compressed 64→16 in TemporalCrossTransformer
             actions_mouse = batch['actions_mouse'].to(device)
-            actions_keys = batch['actions_keys'].to(device)
-            action_seq = torch.cat([actions_mouse, actions_keys], dim=-1)  # (B, 64, 22)
+            actions_keys  = batch['actions_keys'].to(device)
+            action_seq    = torch.cat([actions_mouse, actions_keys], dim=-1)  # (B, 64, 22)
 
             state_vec = batch['state_vec'].to(device)
-            gt_mouse = batch['target_mouse'].to(device)
-            gt_keys = batch['intent'].to(device)
+            gt_mouse  = batch['target_mouse'].to(device)
+            gt_keys   = batch['intent'].to(device)
 
-            # Audio (linspace 32 → 16)
             audio_embeds = None
             if USE_AUDIO and audio_encoder and 'audio_waveform' in batch:
                 waveform = batch['audio_waveform'].to(device)
@@ -699,38 +718,31 @@ def train():
             if scaler is not None:
                 with torch.amp.autocast(device_type='cuda', dtype=torch.float16):
                     mouse_embed, policy_keys, _ = temporal_model(
-                        radar_seq=radar_embeds,
-                        scene_seq=scene_embeds,
-                        detection_seq=detect_embeds,
-                        action_seq=action_seq,
-                        state_vec=state_vec,
-                        audio_seq=audio_embeds,
+                        radar_seq=radar_embeds, scene_seq=scene_embeds,
+                        detection_seq=detect_embeds, action_seq=action_seq,
+                        state_vec=state_vec, audio_seq=audio_embeds,
                     )
                     loss_mouse = flow_head.compute_loss(mouse_embed, gt_mouse)
-                    loss_keys = bce_loss(policy_keys, gt_keys)
+                    loss_keys  = bce_loss(policy_keys, gt_keys)
                     loss = loss_mouse + W_KEYS * loss_keys
             else:
                 mouse_embed, policy_keys, _ = temporal_model(
-                    radar_seq=radar_embeds,
-                    scene_seq=scene_embeds,
-                    detection_seq=detect_embeds,
-                    action_seq=action_seq,
-                    state_vec=state_vec,
-                    audio_seq=audio_embeds,
+                    radar_seq=radar_embeds, scene_seq=scene_embeds,
+                    detection_seq=detect_embeds, action_seq=action_seq,
+                    state_vec=state_vec, audio_seq=audio_embeds,
                 )
                 loss_mouse = flow_head.compute_loss(mouse_embed, gt_mouse)
-                loss_keys = bce_loss(policy_keys, gt_keys)
+                loss_keys  = bce_loss(policy_keys, gt_keys)
                 loss = loss_mouse + W_KEYS * loss_keys
 
             # Debug every 100 iters
             if i > 0 and i % 100 == 0:
                 with torch.no_grad():
                     sampled = flow_head.sample(mouse_embed)
-                print(f'\n[iter {i}] flow={loss_mouse.item():.4f} keys={loss_keys.item():.4f}')
-                print(f'[iter {i}] gt_mouse mean={gt_mouse.mean():.3f} std={gt_mouse.std():.3f}')
-                print(f'[iter {i}] pred_mouse mean={sampled.mean():.3f} std={sampled.std():.3f}')
-                print(f'[iter {i}] cache: feat={feat_cache.hit_rate:.1%} ({len(feat_cache)}/{feat_cache.max_size})  '
-                      f'det={det_cache.hit_rate:.1%} ({len(det_cache)}/{det_cache.max_size})')
+                cur_lr = optimizer.param_groups[0]['lr']
+                print(f'\n[step {global_step}] flow={loss_mouse.item():.4f} keys={loss_keys.item():.4f} lr={cur_lr:.2e}')
+                print(f'[step {global_step}] gt_mouse mean={gt_mouse.mean():.3f} std={gt_mouse.std():.3f}')
+                print(f'[step {global_step}] pred_mouse mean={sampled.mean():.3f} std={sampled.std():.3f}')
                 if iter_preds:
                     iter_arr_p = np.concatenate(iter_preds, axis=0)
                     iter_arr_l = np.concatenate(iter_labels, axis=0)
@@ -739,7 +751,7 @@ def train():
                         [(k, m) for k, m in iter_metrics.items() if m['support'] > 5],
                         key=lambda x: x[1]['recall']
                     )
-                    print(f'[iter {i}] Worst keys by recall:')
+                    print(f'[step {global_step}] Worst keys by recall:')
                     for kn, m in worst[:3]:
                         print(f'  {kn:>8}: recall={m["recall"]:.3f} supp={m["support"]}')
                     iter_preds, iter_labels = [], []
@@ -756,74 +768,85 @@ def train():
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(params, max_norm=1.0)
                 optimizer.step()
+            scheduler.step()
 
+            global_step += 1
             total_loss += loss.item()
             total_flow_loss += loss_mouse.item()
 
             with torch.no_grad():
-                preds_k = (torch.sigmoid(policy_keys) > 0.5).cpu().numpy()
+                preds_k  = (torch.sigmoid(policy_keys) > 0.5).cpu().numpy()
                 labels_k = gt_keys.cpu().numpy()
                 all_preds_train.append(preds_k)
                 all_labels_train.append(labels_k)
                 iter_preds.append(preds_k)
                 iter_labels.append(labels_k)
 
-        # Train metrics
+            # ---- Mid-epoch validation every EVAL_EVERY steps ----
+            if global_step % EVAL_EVERY == 0:
+                avg_val = evaluate(
+                    val_loader, radar_encoder, yolo, temporal_model, flow_head,
+                    audio_encoder, bce_loss, device,
+                    MAX_DET, W_KEYS, METRICS_FILE, USE_AUDIO, global_step, LOG_DIR,
+                    img_size=IMG_SIZE, nc=NC, max_batches=3000,
+                )
+                step_log = (f'[step {global_step}] Val Loss: {avg_val:.4f}')
+                log_metrics(step_log, METRICS_FILE)
+                print(step_log)
+                # Resume train mode after eval
+                radar_encoder.train(); temporal_model.train(); flow_head.train()
+                if audio_encoder: audio_encoder.train()
+                yolo.eval()
+
+            # ---- Mid-epoch checkpoint every CKPT_EVERY steps ----
+            if global_step % CKPT_EVERY == 0:
+                avg_train_so_far = total_loss / max(i + 1, 1)
+                cur_lr = optimizer.param_groups[0]['lr']
+                ckpt = _save_checkpoint(global_step, epoch + 1, avg_train_so_far, 0.0)
+                torch.save(ckpt, os.path.join(CKPT_DIR, f'step_{global_step}.pth'))
+                ckpt_log = (f'[step {global_step}] Checkpoint saved | '
+                            f'train_loss={avg_train_so_far:.4f} lr={cur_lr:.2e}')
+                log_metrics(ckpt_log, METRICS_FILE)
+                print(ckpt_log)
+
+        # ---- End-of-epoch metrics ----
         n = max(len(train_loader), 1)
         avg_train = total_loss / n
-        avg_flow = total_flow_loss / n
+        avg_flow  = total_flow_loss / n
         all_p = np.concatenate(all_preds_train, axis=0)
         all_l = np.concatenate(all_labels_train, axis=0)
         if SKLEARN_AVAILABLE:
             trn_prec = precision_score(all_l.flatten(), all_p.flatten(), zero_division=0)
-            trn_rec = recall_score(all_l.flatten(), all_p.flatten(), zero_division=0)
+            trn_rec  = recall_score(all_l.flatten(), all_p.flatten(), zero_division=0)
         else:
             tp = np.sum((all_l == 1) & (all_p == 1))
             fp = np.sum((all_l == 0) & (all_p == 1))
             fn = np.sum((all_l == 1) & (all_p == 0))
             trn_prec = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-            trn_rec = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            trn_rec  = tp / (tp + fn) if (tp + fn) > 0 else 0.0
 
-        trn_log = (f'Train — Loss: {avg_train:.4f} | Flow: {avg_flow:.4f} | '
+        trn_log = (f'Epoch [{epoch+1}/{NUM_EPOCHS}] step={global_step} '
+                   f'Train Loss: {avg_train:.4f} | Flow: {avg_flow:.4f} | '
                    f'Prec: {trn_prec:.4f} | Rec: {trn_rec:.4f}')
-        cache_log = (f'Cache — feat: {feat_cache.hit_rate:.1%} ({len(feat_cache)} entries)  '
-                     f'det: {det_cache.hit_rate:.1%} ({len(det_cache)} entries)')
         log_metrics(trn_log, METRICS_FILE)
-        log_metrics(cache_log, METRICS_FILE)
         print(trn_log)
-        print(cache_log)
 
-        # Validation
+        # End-of-epoch validation
         avg_val = evaluate(
             val_loader, radar_encoder, yolo, temporal_model, flow_head,
             audio_encoder, bce_loss, device,
-            MAX_DET, W_KEYS, METRICS_FILE, USE_AUDIO, epoch, LOG_DIR,
+            MAX_DET, W_KEYS, METRICS_FILE, USE_AUDIO, global_step, LOG_DIR,
             img_size=IMG_SIZE, nc=NC,
-            feat_cache=feat_cache, det_cache=det_cache,
         )
-
         epoch_log = f'Epoch [{epoch+1}/{NUM_EPOCHS}] Train: {avg_train:.4f} | Val: {avg_val:.4f}'
         log_metrics(epoch_log, METRICS_FILE)
         print(epoch_log)
 
-        # Save checkpoint
-        ckpt_data = {
-            'epoch': epoch + 1,
-            'radar_encoder': radar_encoder.state_dict(),
-            'yolo': yolo.state_dict(),
-            'temporal_model': temporal_model.state_dict(),
-            'flow_head': flow_head.state_dict(),
-            'optimizer': optimizer.state_dict(),
-            'train_loss': avg_train,
-            'val_loss': avg_val,
-        }
-        if audio_encoder:
-            ckpt_data['audio_encoder'] = audio_encoder.state_dict()
-
-        torch.save(ckpt_data, os.path.join(CKPT_DIR, f'epoch_{epoch+1}.pth'))
+        ckpt = _save_checkpoint(global_step, epoch + 1, avg_train, avg_val)
+        torch.save(ckpt, os.path.join(CKPT_DIR, f'epoch_{epoch+1}.pth'))
         if avg_val < best_val_loss:
             best_val_loss = avg_val
-            torch.save(ckpt_data, os.path.join(CKPT_DIR, 'best.pth'))
+            torch.save(ckpt, os.path.join(CKPT_DIR, 'best.pth'))
         print(f'Saved checkpoint (val={avg_val:.4f}, best={best_val_loss:.4f})')
 
 

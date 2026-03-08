@@ -610,6 +610,21 @@ class FeatureCache:
             else:
                 self._cache[key] = value.detach().half().cpu()
 
+    def save(self, path: str):
+        """Save cache to disk (float16 tensors)."""
+        torch.save({'cache': dict(self._cache), 'max_size': self.max_size}, path)
+        print(f"[FeatureCache] Saved {len(self._cache)} entries -> {path}")
+
+    @classmethod
+    def load(cls, path: str, max_size: int = 50000) -> 'FeatureCache':
+        """Load cache from disk."""
+        obj = cls(max_size=max_size)
+        data = torch.load(path, map_location='cpu', weights_only=True)
+        obj._cache = OrderedDict(data['cache'])
+        obj.max_size = max(max_size, len(obj._cache))
+        print(f"[FeatureCache] Loaded {len(obj._cache)} entries from {path}")
+        return obj
+
     @property
     def hit_rate(self) -> float:
         total = self.hits + self.misses

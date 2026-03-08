@@ -1,335 +1,226 @@
 """
-Inference module for CS2 buy prediction.
-Use this to get buy recommendations during gameplay.
+Inference for CS2 buy prediction.
+Uses only GSI-available features at runtime.
+
+Usage:
+    agent = BuyAgent("./buy_models/buy_v2")
+    items = agent.recommend(
+        money=4500, round_num=5, team_score=2, enemy_score=2,
+        loss_streak=0, equipment_value=200, team='T'
+    )
+    # -> ['ak47', 'vesthelm', 'smokegrenade', 'flashbang', 'molotov']
 """
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Optional, Any
-from dataclasses import dataclass
+from typing import Dict, List, Any
 from pathlib import Path
 
-from model import BuyPredictor
-from features import WEAPON_PRICES, WEAPON_CATEGORIES
+from .model import BuyPredictor
+from .features import (
+    WEAPON_PRICES, PRIMARY_LABELS, ARMOR_LABELS,
+    LOSS_BONUS, engineer_features,
+)
 
 
-@dataclass
-class GameState:
-    """Current game state for buy prediction."""
-    money: int
-    teammates_money: List[int]  # List of 4 teammate money values
-    team_num: int  # 2 = T, 3 = CT
-    round_num: int
-    score_t: int
-    score_ct: int
+# Default weapon picks per side and primary class
+WEAPON_MAP = {
+    # primary_class: {team_num: weapon_name}
+    1: {2: 'tec9', 3: 'fiveseven'},        # pistol upgrade
+    2: {2: 'mac10', 3: 'mp9'},             # smg
+    3: {2: 'ak47', 3: 'm4a1_silencer'},    # rifle
+    4: {2: 'awp', 3: 'awp'},               # awp
+    5: {2: 'ssg08', 3: 'ssg08'},           # scout
+}
+
+ARMOR_MAP = {1: 'vest', 2: 'vesthelm'}
+
+GRENADE_MAP = {
+    'buy_smoke': 'smokegrenade',
+    'buy_flash': 'flashbang',
+    'buy_he': 'hegrenade',
+    'buy_molotov': {2: 'molotov', 3: 'incgrenade'},
+}
 
 
 class BuyAgent:
     """
-    Agent for making buy decisions in CS2.
+    Buy recommendation agent using only GSI data.
 
-    Usage:
-        agent = BuyAgent("./buy_models/buy_predictor_v1")
-        state = GameState(
-            money=4500,
-            teammates_money=[3200, 5100, 2800, 4000],
-            team_num=2,  # T side
-            round_num=5,
-            score_t=2,
-            score_ct=2
-        )
-        recommendation = agent.recommend(state)
+    All inputs are available from CS2 Game State Integration:
+      - money: player.state.money
+      - round_num: map.round + 1
+      - team_score/enemy_score: from map.team_ct.score / map.team_t.score
+      - loss_streak: computed from map.round_wins pattern
+      - equipment_value: player.state.equip_value
+      - team: player.team (T/CT)
     """
 
     def __init__(self, model_path: str):
-        """
-        Initialize the buy agent.
-
-        Args:
-            model_path: Path to saved model directory
-        """
         self.predictor = BuyPredictor()
         self.predictor.load(model_path)
 
-    def _create_features(self, state: GameState) -> pd.DataFrame:
-        """Convert GameState to feature DataFrame."""
-        teammates = state.teammates_money
+    def _build_features(
+        self,
+        money: int,
+        round_num: int,
+        team_score: int,
+        enemy_score: int,
+        loss_streak: int,
+        equipment_value: int,
+        team_num: int,
+    ) -> pd.DataFrame:
+        """Build feature DataFrame from GSI values."""
+        row = pd.DataFrame([{
+            'money': money,
+            'equipment_value': equipment_value,
+            'round_num': round_num,
+            'team_score': team_score,
+            'enemy_score': enemy_score,
+            'loss_streak': min(loss_streak, 4),
+            'team_num': team_num,
+        }])
+        return engineer_features(row)
 
-        # Calculate team statistics
-        team_money_total = sum(teammates) + state.money
-        team_money_avg = team_money_total / 5
-
-        # Score difference from player's perspective
-        if state.team_num == 2:  # T side
-            score_diff = state.score_t - state.score_ct
-        else:  # CT side
-            score_diff = state.score_ct - state.score_t
-
-        features = {
-            'money': state.money,
-            'money_log': np.log1p(state.money),
-            'team_money_total': team_money_total,
-            'team_money_avg': team_money_avg,
-            'can_full_buy': int(state.money >= 4100),
-            'can_awp': int(state.money >= 5750),
-            'can_half_buy': int(state.money >= 2000),
-            'money_for_save': int(state.money < 1500),
-            'team_can_full_buy': int(team_money_avg >= 4100),
-            'team_poor': int(team_money_avg < 2000),
-            'money_diff_from_team': state.money - team_money_avg,
-            'money_ratio_to_team': state.money / (team_money_avg + 1),
-            'teammate_money_min': min(teammates) if teammates else 0,
-            'teammate_money_max': max(teammates) if teammates else 0,
-            'teammate_money_std': np.std(teammates) if teammates else 0,
-            'teammates_can_buy': sum(1 for m in teammates if m >= 4100),
-            'round_num': state.round_num,
-            'score_t': state.score_t,
-            'score_ct': state.score_ct,
-            'score_diff': score_diff,
-            'total_rounds_played': state.score_t + state.score_ct,
-            'is_winning': int(score_diff > 0),
-            'is_losing': int(score_diff < 0),
-            'is_tied': int(score_diff == 0),
-            'is_first_half': int(state.round_num <= 12),
-            'is_second_half': int(state.round_num > 12),
-            'rounds_until_half': max(0, 12 - state.round_num) if state.round_num <= 12 else 0,
-            'is_last_round_first_half': int(state.round_num == 12),
-            'is_last_round_second_half': int(state.round_num == 24),
-            'is_t_side': int(state.team_num == 2),
-            'is_ct_side': int(state.team_num == 3),
-            'round_after_pistol': int(state.round_num in [2, 14]),
-            'is_pistol_round': int(state.round_num in [1, 13]),
-        }
-
-        return pd.DataFrame([features])
-
-    def recommend(self, state: GameState) -> Dict[str, Any]:
+    def recommend(
+        self,
+        money: int,
+        round_num: int,
+        team_score: int,
+        enemy_score: int,
+        loss_streak: int = 0,
+        equipment_value: int = 0,
+        team: str = 'T',
+    ) -> Dict[str, Any]:
         """
-        Get buy recommendation for current game state.
-
-        Args:
-            state: Current GameState
+        Get exact buy recommendation.
 
         Returns:
-            Dictionary with:
-            - buy_type: 'eco', 'force_buy', 'half_buy', 'full_buy'
-            - confidence: float 0-1
-            - suggested_items: list of item names
-            - estimated_cost: total cost of suggested items
-            - money_remaining: money after purchase
+            {
+                'items': ['ak47', 'vesthelm', 'smokegrenade', ...],
+                'total_cost': 4400,
+                'money_remaining': 100,
+                'primary': 'rifle',
+                'armor': 'vesthelm',
+                'grenades': ['smokegrenade', 'flashbang'],
+            }
         """
-        features = self._create_features(state)
-        predictions = self.predictor.predict(features)
-
-        buy_types = ['eco', 'force_buy', 'half_buy', 'full_buy']
-        buy_idx = predictions['buy_type'][0]
-        buy_type = buy_types[buy_idx]
-        confidence = float(predictions['buy_type_probs'][0, buy_idx])
-
-        # Get item probabilities
-        rifle_prob = predictions.get('rifle_prob', [0])[0]
-        armor_prob = predictions.get('armor_prob', [0])[0]
-        awp_prob = predictions.get('awp_prob', [0])[0]
-
-        # Generate suggested items based on buy type and probabilities
-        suggested_items = self._suggest_items(
-            state, buy_type, rifle_prob, armor_prob, awp_prob
+        team_num = 2 if team.upper() == 'T' else 3
+        features = self._build_features(
+            money, round_num, team_score, enemy_score,
+            loss_streak, equipment_value, team_num
         )
 
-        # Calculate costs
-        estimated_cost = sum(WEAPON_PRICES.get(item, 0) for item in suggested_items)
-        money_remaining = state.money - estimated_cost
+        preds = self.predictor.predict(features)
+        items = []
+        budget = money
+
+        # Primary weapon
+        primary_cls = int(preds.get('primary', [0])[0])
+        if primary_cls > 0 and primary_cls in WEAPON_MAP:
+            weapon = WEAPON_MAP[primary_cls][team_num]
+            cost = WEAPON_PRICES.get(weapon, 0)
+            if budget >= cost:
+                items.append(weapon)
+                budget -= cost
+
+        # Armor
+        armor_cls = int(preds.get('armor', [0])[0])
+        if armor_cls > 0 and armor_cls in ARMOR_MAP:
+            armor = ARMOR_MAP[armor_cls]
+            cost = WEAPON_PRICES.get(armor, 0)
+            if budget >= cost:
+                items.append(armor)
+                budget -= cost
+
+        # Grenades
+        grenades = []
+        for key, item_or_map in GRENADE_MAP.items():
+            if int(preds.get(key, [0])[0]):
+                if isinstance(item_or_map, dict):
+                    item = item_or_map[team_num]
+                else:
+                    item = item_or_map
+                cost = WEAPON_PRICES.get(item, 0)
+                if budget >= cost:
+                    items.append(item)
+                    grenades.append(item)
+                    budget -= cost
+
+        # Defuser (CT only)
+        if team_num == 3 and int(preds.get('buy_defuser', [0])[0]):
+            cost = WEAPON_PRICES.get('defuser', 400)
+            if budget >= cost:
+                items.append('defuser')
+                budget -= cost
+
+        total_cost = money - budget
 
         return {
-            'buy_type': buy_type,
-            'confidence': confidence,
-            'suggested_items': suggested_items,
-            'estimated_cost': estimated_cost,
-            'money_remaining': max(0, money_remaining),
-            'probabilities': {
-                'rifle': float(rifle_prob),
-                'armor': float(armor_prob),
-                'awp': float(awp_prob),
-            }
+            'items': items,
+            'total_cost': total_cost,
+            'money_remaining': budget,
+            'primary': PRIMARY_LABELS.get(primary_cls, 'none'),
+            'armor': ARMOR_LABELS.get(armor_cls, 'none'),
+            'grenades': grenades,
         }
 
-    def _suggest_items(
-        self,
-        state: GameState,
-        buy_type: str,
-        rifle_prob: float,
-        armor_prob: float,
-        awp_prob: float
-    ) -> List[str]:
-        """Generate suggested items based on predictions and budget."""
-        items = []
-        budget = state.money
-        is_ct = state.team_num == 3
+    def recommend_from_gsi(self, gsi_state: dict) -> Dict[str, Any]:
+        """
+        Recommend directly from GSI JSON state.
 
-        if buy_type == 'eco':
-            # Maybe a pistol upgrade if rich enough
-            if budget >= 500:
-                items.append('p250')
-                budget -= 300
-            return items
+        Expected gsi_state structure:
+            player.state.money, player.state.equip_value, player.team
+            map.round, map.team_ct.score, map.team_t.score, map.round_wins
+        """
+        player = gsi_state.get('player', {})
+        state = player.get('state', {})
+        map_data = gsi_state.get('map', {})
 
-        if buy_type == 'force_buy':
-            # Upgrade pistol + utility
-            if budget >= 500:
-                items.append('tec9' if not is_ct else 'fiveseven')
-                budget -= 500
+        money = state.get('money', 0)
+        equip = state.get('equip_value', 0)
+        team = player.get('team', 'T')
+        round_num = map_data.get('round', 0) + 1
 
-            if budget >= 200:
-                items.append('flashbang')
-                budget -= 200
+        if team.upper() in ('T', 'TERRORIST'):
+            team_score = map_data.get('team_t', {}).get('score', 0)
+            enemy_score = map_data.get('team_ct', {}).get('score', 0)
+        else:
+            team_score = map_data.get('team_ct', {}).get('score', 0)
+            enemy_score = map_data.get('team_t', {}).get('score', 0)
 
-            if armor_prob > 0.5 and budget >= 650:
-                items.append('vest')
-                budget -= 650
-
-            return items
-
-        if buy_type == 'half_buy':
-            # SMG + armor
-            if budget >= 1250:
-                items.append('mac10' if not is_ct else 'mp9')
-                budget -= 1050 if not is_ct else 1250
-
-            if budget >= 650:
-                items.append('vest')
-                budget -= 650
-
-            return items
-
-        # Full buy
-        if awp_prob > 0.5 and budget >= 5750:
-            items.append('awp')
-            budget -= 4750
-
-            if budget >= 1000:
-                items.append('vesthelm')
-                budget -= 1000
-        elif rifle_prob > 0.3 or budget >= 4100:
-            # Rifle
-            if is_ct:
-                items.append('m4a1_silencer')
-                budget -= 2900
-            else:
-                items.append('ak47')
-                budget -= 2700
-
-            # Armor
-            if budget >= 1000:
-                items.append('vesthelm')
-                budget -= 1000
-            elif budget >= 650:
-                items.append('vest')
-                budget -= 650
-
-        # Add utilities with remaining budget
-        if budget >= 300:
-            items.append('smokegrenade')
-            budget -= 300
-
-        if budget >= 200:
-            items.append('flashbang')
-            budget -= 200
-
-        if budget >= 300 and not is_ct:
-            items.append('molotov')
-            budget -= 400
-        elif budget >= 600 and is_ct:
-            items.append('incgrenade')
-            budget -= 600
-
-        if budget >= 300:
-            items.append('hegrenade')
-            budget -= 300
-
-        return items
-
-    def recommend_batch(self, states: List[GameState]) -> List[Dict[str, Any]]:
-        """Get recommendations for multiple game states."""
-        return [self.recommend(state) for state in states]
-
-
-def quick_recommend(
-    money: int,
-    teammates_money: List[int],
-    team: str = 'T',
-    round_num: int = 1,
-    score: tuple = (0, 0),
-    model_path: str = "./buy_models/buy_predictor_v1"
-) -> Dict[str, Any]:
-    """
-    Quick function for getting buy recommendation.
-
-    Args:
-        money: Player's current money
-        teammates_money: List of 4 teammate money values
-        team: 'T' or 'CT'
-        round_num: Current round number (1-30)
-        score: Tuple of (T score, CT score)
-        model_path: Path to model
-
-    Returns:
-        Buy recommendation dictionary
-    """
-    agent = BuyAgent(model_path)
-
-    state = GameState(
-        money=money,
-        teammates_money=teammates_money,
-        team_num=2 if team.upper() == 'T' else 3,
-        round_num=round_num,
-        score_t=score[0],
-        score_ct=score[1]
-    )
-
-    return agent.recommend(state)
-
-
-if __name__ == "__main__":
-    # Example usage
-    print("CS2 Buy Prediction Agent")
-    print("=" * 50)
-
-    # Check if model exists
-    model_path = "./buy_models/buy_predictor_v1"
-    if not Path(model_path).exists():
-        print(f"Model not found at {model_path}")
-        print("Train a model first using train.py")
-        print("\nShowing example with dummy predictions...")
-
-        # Demo without trained model
-        state = GameState(
-            money=4500,
-            teammates_money=[3200, 5100, 2800, 4000],
-            team_num=2,
-            round_num=5,
-            score_t=2,
-            score_ct=2
+        # Compute loss streak from round_wins
+        loss_streak = self._compute_loss_streak(
+            map_data.get('round_wins', {}), team
         )
-        print(f"\nGame State:")
-        print(f"  Money: ${state.money}")
-        print(f"  Team money: {state.teammates_money}")
-        print(f"  Round: {state.round_num}")
-        print(f"  Score: {state.score_t}-{state.score_ct}")
-    else:
-        agent = BuyAgent(model_path)
 
-        # Test different scenarios
-        scenarios = [
-            GameState(800, [800, 800, 800, 800], 2, 1, 0, 0),  # Pistol round
-            GameState(1400, [1400, 1400, 1400, 1400], 2, 2, 0, 1),  # After losing pistol
-            GameState(4500, [4200, 5100, 3800, 4000], 2, 5, 2, 2),  # Mid-game full buy
-            GameState(2100, [1500, 3000, 2500, 2800], 3, 8, 3, 4),  # Force buy CT
-            GameState(6500, [6000, 5500, 7000, 6200], 2, 12, 5, 6),  # Last round first half
-        ]
+        return self.recommend(
+            money=money,
+            round_num=round_num,
+            team_score=team_score,
+            enemy_score=enemy_score,
+            loss_streak=loss_streak,
+            equipment_value=equip,
+            team=team,
+        )
 
-        for i, state in enumerate(scenarios):
-            rec = agent.recommend(state)
-            side = 'T' if state.team_num == 2 else 'CT'
-            print(f"\nScenario {i+1}: Round {state.round_num}, {side} side, ${state.money}")
-            print(f"  Recommendation: {rec['buy_type']} (conf: {rec['confidence']:.2f})")
-            print(f"  Suggested: {rec['suggested_items']}")
-            print(f"  Cost: ${rec['estimated_cost']}, Remaining: ${rec['money_remaining']}")
+    @staticmethod
+    def _compute_loss_streak(round_wins: dict, team: str) -> int:
+        """
+        Compute current loss streak from GSI round_wins.
+
+        round_wins is like {"1": "ct", "2": "t", "3": "ct", ...}
+        """
+        if not round_wins:
+            return 0
+
+        team_lower = 'ct' if team.upper() in ('CT', 'COUNTER-TERRORIST') else 't'
+        # Get rounds in order
+        rounds = sorted(round_wins.items(), key=lambda x: int(x[0]), reverse=True)
+
+        streak = 0
+        for _, winner in rounds:
+            if winner.lower() != team_lower:
+                streak += 1
+            else:
+                break
+        return min(streak, 4)

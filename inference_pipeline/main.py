@@ -82,7 +82,10 @@ def parse_args():
     # Tuning
     parser.add_argument("--sensitivity", type=float, default=1.0, help="Mouse sensitivity multiplier")
     parser.add_argument("--key-threshold", type=float, default=0.5, help="Key press probability threshold")
-    parser.add_argument("--inference-rate", type=int, default=16, help="Target inference rate (Hz)")
+
+    # Alive digit detector
+    parser.add_argument("--alive-digit-model", type=str, default="./alive_digit/best.pt",
+                        help="Path to alive digit CNN weights (.pt)")
 
     # Screen capture
     parser.add_argument("--monitor", type=int, default=1, help="Monitor index (1=primary)")
@@ -106,7 +109,6 @@ def create_config(args) -> Config:
 
     config.mouse_sensitivity = args.sensitivity
     config.key_threshold = args.key_threshold
-    config.inference_rate = args.inference_rate
 
     config.monitor_index = args.monitor
     config.screen_width = args.screen_width
@@ -114,6 +116,7 @@ def create_config(args) -> Config:
 
     config.gsi_host = args.gsi_host
     config.gsi_port = args.gsi_port
+    config.alive_digit_model_path = args.alive_digit_model
 
     return config
 
@@ -133,8 +136,9 @@ def print_config(config: Config, args):
     print("\n[Configuration]")
     print(f"  Checkpoint: {config.checkpoint_path}")
     print(f"  Device: {config.device}")
-    print(f"  Inference rate: {config.inference_rate} Hz")
+    print(f"  Mode: event-driven (no FPS cap)")
     print(f"  Screen: {config.screen_width}x{config.screen_height} (monitor {config.monitor_index})")
+    print(f"  Radar rate: {config.radar_rate} Hz | Audio rate: {config.audio_rate} Hz | Alive rate: {config.alive_digit_rate} Hz")
     print(f"\n[Features]")
     print(f"  Audio encoder: {'Enabled (stereo 16sec)' if config.use_audio else 'Disabled'}")
     print(f"  TensorRT FP16: {'Enabled' if config.use_trt else 'Disabled'}")
@@ -143,6 +147,7 @@ def print_config(config: Config, args):
     print(f"  Auto-buy: {'Enabled' if config.use_buy else 'Disabled'}")
     print(f"  Debug overlay: {'Enabled' if config.use_overlay else 'Disabled'}")
     print(f"  Apply actions: {'Enabled' if config.apply_actions else 'DISABLED (observation mode)'}")
+    print(f"  Alive digit CNN: {config.alive_digit_model_path} ({'exists' if Path(config.alive_digit_model_path).exists() else 'NOT FOUND'})")
     print(f"  GSI server: {'Disabled (--no-gsi)' if args.no_gsi else f'http://{config.gsi_host}:{config.gsi_port}'}")
     print(f"\n[Tuning]")
     print(f"  Mouse sensitivity: {config.mouse_sensitivity}")
@@ -283,8 +288,8 @@ def main():
         while engine.is_running and not shutdown_event.is_set():
             time.sleep(0.1)
 
-            # Log GSI status every 30 sec
-            if gsi_server and engine._inference_count % (30 * config.inference_rate) == 0 and engine._inference_count > 0:
+            # Log GSI status every ~500 inferences
+            if gsi_server and engine._inference_count % 500 == 0 and engine._inference_count > 0:
                 secs = gsi_server.seconds_since_update()
                 if secs > 5:
                     print(f"[WARNING] No GSI update for {secs:.0f}s — game state may be stale")
