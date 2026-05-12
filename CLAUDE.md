@@ -8,9 +8,9 @@ CS2 AI Agent — нейросетевой агент для игры в Counter-
 
 ## Architecture
 
-### Active Implementation: `final_model/`
+### Active Implementation: `final_model_v3/`
 
-Итоговая архитектура ~50.8M параметров. Perception/Control ratio: **1.66x** ✅
+Stage 3 — Hierarchical Joint Mouse+Keys with UnifiedActionHead.
 
 ```
 Component                              Params    Status
@@ -18,115 +18,78 @@ Component                              Params    Status
 RadarEncoder (EffB0 blocks 1-5)        ~1.0M    trainable
 YOLO (YOLOv11l backbone + FPN)         ~25.4M   FROZEN
 YOLO embeds head                       ~1.6M    trainable
-StereoAudioEncoder (MN10 / mn10_as)   ~4.88M   trainable  ← стерео
-TemporalTransformer (d=384, L=4)       ~19.0M   trainable
-FlowActionHead                         ~0.3M    trainable
+StereoAudioEncoder (MN10 / mn10_as)    ~4.88M   trainable
+TemporalTransformer (d=384, L=4)       ~20.9M   trainable (register self-attn, no keys_head)
+PlannerHead (joint mouse+keys traj)    ~0.53M   trainable
+UnifiedActionHead (joint mouse+keys)   ~0.78M   trainable
 ───────────────────────────────────────────────────────
-Total:     ~52.2M   |   Trainable: ~26.8M   |   Ratio: 1.72x ✅
+Total:     ~55.1M   |   Trainable: ~29.7M
 ```
 
-### Component Details (`final_model/`)
+### Hierarchical Architecture (Stage 3)
+
+```
+TemporalCrossTransformer
+        ↓
+unified_context (B, 81, 384)
+        ↓
+cross_attn: 3 register tokens → context
+        ↓
+register self-attention (3 → 3, cross-task coupling)
+        ↓
+(mouse_embed, keys_embed, value_embed)  — all (B, 384)
+        ↓
+┌───────┴──────────────────────┐
+↓                              ↓
+PlannerHead                UnifiedActionHead
+concat(mouse, keys)        mouse_embed + keys_embed +
+→ (B, 768)                 goal_attn(detections) +
+→ MLP 768→512→272          planner_feat(512-dim)
+→ (B, 16, 17)             → shared backbone → (B, 256)
+  2 mouse +                ├→ mouse bins X (19) + Y (13)
+  15 keys                  ├→ mouse offset regression
+  (granades excluded)      └→ keys logits (20, all keys)
+```
+
+### Component Details (`final_model_v3/`)
 
 #### 1. RadarEncoder (`RadarEncoder.py`)
-- EfficientNet-B0 blocks 1–5 (~1.0M); раньше был 1-4 (~0.35M)
+- EfficientNet-B0 blocks 1–5 (~1.0M)
 - Вход: `(B, 3, 224, 224)` — кропнутый радар
 - Выход: `(B, 512)` — эмбеддинг
-- Crop box: `(10, 25, 140, 170)` из оригинального кадра
 
 #### 2. YOLO (`Yolo.py`) — YOLOv11l
-- Backbone (слои 0–16) + FPN: **заморожены**
-- Embed branch: P3 (layer 16, 256ch, 80×80) + P5 skip (layer 10, 512ch, 20×20)
-  - UNet-like head: P3 down-to-20×20, skip-add P5 → InvRes → pool → `(B, 512)`
-- Ключевые методы:
-  - `extract_features(img)` — останавливается на layer 16, возвращает `(p3, p5)` → **кешируется**
-  - `embed_from_features(p3, p5)` — trainable embed head → `(B, 512)`, **всегда с gradient**
-  - `forward_detections_only(img)` — только детекции, без embed
-- Детекции: 2 класса (`body=0`, `head=1`), nc=2
+- Backbone (слои 0–16) + FPN: **заморожены** (~25.4M)
+- Embed head: trainable (~1.6M), `(p3, p5) → (B, 512)`
+- Train2GPU: backbone runs on GPU 0 (scorer process), embed head on GPU 1
 
 #### 3. StereoAudioEncoder (`AudioEncoder.py`) — MobileNetV3-Large (mn10_as)
-- MobileNetV3-Large с `width_mult=1.0` — та же архитектура что EfficientAT mn10_as (~4.88M)
-- **Вход: `(B, 2, T)` стерео @ 16kHz**, T=256,000 (16 sec) — оба канала для ILD/HRTF
-- `StereoMelFrontend`: `(B, 2, T)` → `(B, 2, 128, 1600)` — 128 mel, hop=160 (10ms), нормализация per channel
-- Backbone (без global pool): `(B, 2, 128, 1600)` → `(B, 960, 4, 50)`
-  - 5 × stride-2 = 32x downsampling в обоих измерениях
-  - 960 каналов — финальный `1×1 Conv` (160→960, = 6×160)
-- Freq pool → `(B, 960, 50)`, Temporal pool 50→32 → `(B, 32, 960)`, Project → `(B, 32, 512)`
-- → linspace до `(B, 16, 512)` в Train.py
-- Pretrained веса: `load_pretrained_mn10as(path)` — адаптирует первый conv (1ch→2ch: w/2)
-  - URL: `https://github.com/fschmid56/EfficientAT/releases/download/v0.0.1/mn10_as.pt`
-  - Все остальные 16 слоёв грузятся as-is (AudioSet pretraining сохраняется)
-- MACs: ~0.9B для 16sec стерео (vs QuartzNet ~1.6B моно)
-- Зачем стерео: CS2 HRTF → шаги/выстрелы имеют L-R разницу → направление угрозы
+- ~4.88M, стерео вход `(B, 2, T)` @ 16kHz, T=256,000 (16 sec)
+- Pretrained: `mn10_as.pt` (AudioSet), first conv adapted 1ch→2ch
 
-#### 4. TemporalTransformer (`TemporalTransformer.py`) — Unified
+#### 4. TemporalTransformer (`TemporalTransformer.py`) — ~20.9M
 - `d_model=384`, `num_heads=8`, `depth=4`, `ff_mult=4`, pre-LayerNorm
-- **ModalityCompressor**: cross-attention сжатие 64→16 через 16 learnable query tokens
-  - Используется для scene (64→16) и action (64→16)
-- Все 6 модальностей конкатенируются → единый shared self-attention
-- Итоговый контекст: **81 токен** (с audio) или **65 токен** (без audio):
-  ```
-  radar:     16 tokens  (32 raw → linspace 16)
-  scene:     16 tokens  (64 raw → ModalityCompressor 64→16)
-  audio:     16 tokens  (32 raw → linspace 16)   ← optional
-  detection: 16 tokens  (64 raw → linspace 16)
-  action:    16 tokens  (64 raw → ModalityCompressor 64→16)
-  state:      1 token   (100-dim → proj 384)
-  ─────────────────────────────────────────
-  Total:     81 tokens (with audio)
-  ```
-- Выходы: `policy_mouse (2)`, `policy_keys (20)`, `value (1)`
+- ModalityCompressor: cross-attention 64→16 (scene, action)
+- 81 tokens unified self-attention (with audio)
+- 3 register tokens (mouse/keys/value) → cross-attn to context → **register self-attention**
+- Returns `(mouse_embed, keys_embed, value_embed)` — heads applied externally
+- **Removed**: ModeHead, policy_keys_head, apply_keys_head
 
-#### 5. FlowActionHead (`TemporalTransformer.py`)
-- Flow Matching для предсказания mouse delta (yaw, pitch)
-- `context_dim=384`, `hidden_dim=256`, `noise_scale=0.3`
+#### 5. PlannerHead (`TemporalTransformer.py`) — ~0.53M
+- Joint trajectory: `concat(mouse_embed, keys_embed)` → `(B, 768)` → MLP → `(B, 16, 17)`
+- 16 waypoints × (2 mouse raw cumulative + 15 keys binary)
+- TRAJECTORY_KEYS: 15 keys (movement + combat + weapons + utility, granades excluded)
+- Loss: SmoothL1 (mouse) + BCEWithLogits (keys) + smoothness penalty
+- Gradient flows end-to-end (no detach) to controller
 
-### Backbone Caching (ключевая оптимизация)
-
-YOLO backbone (frozen) кешируется в FeatureCache (LRU, float16, CPU) для ускорения:
-
-```python
-# В Train.py — два кеша:
-feat_cache = FeatureCache(max_size=5000)   # (p3, p5) tuples
-det_cache  = FeatureCache(max_size=5000)   # detection vectors
-
-# build_scene_embeddings: проверяет кеш per frame path
-cached = feat_cache.get(frame_path)  # → (p3, p5) or None
-# backbone forward только для uncached frames
-p3, p5 = yolo.extract_features(imgs)  # no_grad, frozen
-feat_cache.put(path, (p3, p5))  # stored as float16 CPU
-
-# embed head всегда с gradient:
-scene_embed = yolo.embed_from_features(p3, p5)  # trainable, 1.6M params
-```
-
-- P3 features: `(256, 80, 80)` + P5: `(512, 20, 20)` → float16 CPU (~3MB/frame pair)
-- Detection vec: `(max_det * 5,)` = `(100,)` float16 CPU
-- Ключ кеша: path к frame файлу
-- Hit rate: ~0% epoch 1 → ~90%+ epoch 2+ (10-20x speedup после прогрева)
-
-### Data Flow
-
-```
-[Radar 224×224]  → RadarEncoder (trainable, 1.0M) → (B, 32, 512) → linspace → (B, 16, 512)
-[Scene 640×640]  → YOLO.extract_features (frozen)  → p3, p5 cached
-                 → YOLO.embed_from_features (trainable, 1.6M) → (B, 64, 512)
-                                                               → ModalityCompressor → (B, 16, 512)
-[Scene 640×640]  → YOLO.forward_detections_only (frozen) → (B, 64, 100) → linspace → (B, 16, 100)
-[Audio 16sec stereo] → StereoAudioEncoder (trainable, 4.88M) → (B, 32, 512) → linspace → (B, 16, 512)
-                       StereoMelFrontend → (B, 2, 128, 1600)
-                       MN10 backbone (no global pool) → (B, 960, 4, 50)
-                       freq pool + temporal pool → (B, 32, 960) → project → (B, 32, 512)
-[Action history] → DatasetIntent → (B, 64, 22)
-                                  → ModalityCompressor → (B, 16, 22)
-[Game State]     → (B, 100)
-                        ↓
-            TemporalTransformer d=384, L=4
-            (B, 81, 384) unified self-attention
-                        ↓
-    FlowActionHead → policy_mouse (2)   [flow matching]
-    KeysHead       → policy_keys (20)   [BCEWithLogits]
-    ValueHead      → value (1)          [for RL/critic]
-```
+#### 6. UnifiedActionHead (`TemporalTransformer.py`) — ~0.78M
+- Replaces DiscretizedMouseHead + policy_keys_head
+- Inputs: mouse_embed(384) + keys_embed(384) + goal_attn(256) + planner_feat(512) = 1536
+- Shared backbone: `Linear(1536, 256) → GELU → LayerNorm`
+- Mouse: discretized bins (19 X, 13 Y) + per-bin offset regression
+- Keys: `Linear(256, 384) → GELU → Linear(384, 20)` — all 20 keys including granades
+- **Soft ordinal CE** (SORD, CVPR 2019): Gaussian soft labels σ_x=1.5, σ_y=0.75
+- Balanced class weights + zero bin curriculum (0.5 → 0.06 over 150k steps)
 
 ### Sequence Dimensions (DatasetIntent.py)
 
@@ -153,16 +116,19 @@ ACTION_SEQ_LEN = 64   # история действий: 64 окна (~4 sec) �
 ## Training
 
 ```bash
-cd final_model && python Train.py
+cd final_model_v3 && python Train2GPU.py   # 2-GPU async pipeline
 ```
 
 ### Key Training Parameters
 
 ```python
 BATCH_SIZE = 4
-LR         = 1e-4
-W_KEYS     = 100     # вес BCE loss для клавиш (класс имбаланс)
-MAX_DET    = 20      # максимум детекций на кадр
+ACCUM_STEPS = 4       # effective BS=16
+LR         = 2e-4     # temporal_model
+LR_VISUAL  = 5e-4     # YOLO embed + radar
+LR_AUDIO   = 1e-4     # audio encoder (pretrained, careful)
+LR_MOUSE   = 1e-3     # unified_head + planner_head
+MAX_DET    = 20
 SEED       = 42
 ```
 
@@ -175,27 +141,51 @@ SEED       = 42
 - At inference: `predicted_rate * T_inference` to get actual delta
 - Action history mouse also normalized by window size for consistency
 
-### Loss Functions
+### Loss Functions (Hierarchical)
 
-| Выход        | Loss                  | Примечание                         |
-|--------------|-----------------------|------------------------------------|
-| mouse delta  | Flow Matching (MSE v) | per-tick rate (normalized by T)    |
-| keys (20)    | BCEWithLogitsLoss     | × W_KEYS=100 из-за редкости нажатий|
-| value        | (будущий critic loss) | пока не используется в BC          |
+```python
+# Planner: dense trajectory supervision (primary anti-collapse signal)
+L_planner = SmoothL1(mouse) + W_TRAJ_KEYS * BCE(keys) + W_SMOOTH * smoothness
+# W_TRAJ_KEYS=1.0, W_SMOOTH=0.1
+
+# Controller: current-tick prediction (joint mouse + keys)
+L_ctrl_mouse = soft_ordinal_CE(bins_x, sigma_x=1.5) + soft_ordinal_CE(bins_y, sigma_y=0.75)
+             + reg_weight * SmoothL1(offsets)
+L_ctrl_keys  = focal_BCE(keys, gamma=1.5, pos_weight=balanced)
+
+# Total
+loss = W_PLANNER * L_planner + W_CTRL_MOUSE * L_ctrl_mouse + W_CTRL_KEYS * L_ctrl_keys
+# W_PLANNER=1.0, W_CTRL_MOUSE=0.2, W_CTRL_KEYS=10.0
+```
+
+| Loss component | Approach | Details |
+|---|---|---|
+| Planner mouse | SmoothL1 | Raw cumulative trajectory, 16 waypoints |
+| Planner keys | BCEWithLogits | 15 keys (granades excluded) |
+| Controller mouse | Soft ordinal CE (SORD) | Gaussian soft labels, balanced weights, zero bin curriculum |
+| Controller keys | Focal BCE | gamma=1.5, sqrt-dampened pos_weight cap=5 |
+| Planner→Controller | End-to-end | No detach, gradient flows through planner_feat |
+
+### Curriculum schedules
+
+- **State dropout**: p_drop 1.0 → 0.0 (phase1=10k, ramp=50k)
+- **Zero bin weight**: 0.5 → 0.06 (ramp=150k) — forces idle detection first
+- **Regression weight**: 0.5 epoch 0 → 1.0 epoch 1+
 
 ### Frozen vs Trainable
 
 ```python
-# FROZEN (не обновляются):
+# FROZEN:
 yolo.backbone         # слои 0–16 (~24M)
 yolo.detect_head      # detect head (~1.4M)
 
 # TRAINABLE:
 yolo.embed_head       # ~1.6M   (UNet embed branch)
 radar_encoder         # ~1.0M   (EffB0 blocks 1-5)
-audio_encoder         # ~4.88M  (MN10 / mn10_as, stereo MobileNetV3)
-temporal_model        # ~19.0M  (d=384, L=4)
-flow_head             # ~0.3M   (FlowActionHead)
+audio_encoder         # ~4.88M  (MN10 / mn10_as, stereo)
+temporal_model        # ~20.9M  (d=384, L=4, register self-attn)
+planner_head          # ~0.53M  (joint trajectory MLP)
+unified_head          # ~0.78M  (joint mouse bins + keys)
 ```
 
 ### Mixed Precision (AMP)
@@ -212,17 +202,34 @@ flow_head             # ~0.3M   (FlowActionHead)
 
 ### Checkpoints
 
-Сохраняются в `./checkpoints_final/<run_name>/`:
-- `radar_encoder`, `yolo`, `temporal_model`, `flow_head`, `audio_encoder`, `optimizer`
+Сохраняются в `./checkpoints_final/<run_name>/checkpoints/`:
+- `radar_encoder`, `yolo`, `temporal_model`, `unified_head`, `planner_head`, `audio_encoder`, `optimizer`, `scheduler`
 - Загрузка с `strict=False`
 
-### Metrics (per epoch)
+### Metrics & Plots
 
-- `flow_loss` — основная mouse loss (flow matching)
-- `bce_loss` — keys loss (weighted BCE)
-- Per-class precision/recall для каждой из 20 клавиш (через sklearn если доступен)
+Логи: `./checkpoints_final/<run_name>/logs/metrics.txt`
+Графики: `./checkpoints_final/<run_name>/plots/step_XXXXXX_{train|val}/`
 
-## Legacy Code (audio_adaptation/src/)
+Каждые METRICS_EVERY (5k) шагов (train) и EVAL_EVERY (30k) шагов (val):
+- `bin_distribution.png` — GT vs Pred bin distribution
+- `keys_precision_recall.png` — per-key P/R bar chart
+- `mouse_scatter.png` — predicted vs GT delta scatter
+
+Text metrics:
+- `acc@1/2/3` — accuracy within ±K bins (ordinal-aware)
+- `mae_bin` — mean absolute error in bin index space
+- `move_detect` — binary accuracy: idle vs movement detection
+- Per-bin accuracy, entropy, MSE
+
+## Legacy Code
+
+### `final_model/` — Stage 1 (FlowActionHead)
+
+Предыдущая архитектура с FlowActionHead для mouse prediction (flow matching).
+Работала, но заменена на hierarchical Stage 3 для joint mouse+keys prediction.
+
+### `audio_adaptation/src/` — Old baseline
 
 Старая версия архитектуры (~42.8M), не используется в обучении:
 - `TemporalCrossTransformer` — d=512, L=6, отдельные radar_encoder + scene_encoder (38M!)
@@ -258,7 +265,7 @@ flow_head             # ~0.3M   (FlowActionHead)
 
 ## Important Notes
 
-- Основной код для обучения — `final_model/`, не `audio_adaptation/src/`
+- Основной код для обучения — `final_model_v3/`, не `final_model/` или `audio_adaptation/src/`
 - YOLO backbone заморожен, обучается только `yolo.embed_head` (~1.6M)
 - Кешировать backbone features (P3/P5) на диск/CPU — критично для скорости
 - `DataLoader` в `final_model` не требует `ExactMatchBucketSampler` (все seq = 16)

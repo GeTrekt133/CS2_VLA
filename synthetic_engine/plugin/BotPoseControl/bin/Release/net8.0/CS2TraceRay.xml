@@ -1,0 +1,1277 @@
+<?xml version="1.0"?>
+<doc>
+    <assembly>
+        <name>CS2TraceRay</name>
+    </assembly>
+    <members>
+        <member name="T:CS2TraceRay.Class.CTraceFilterVTableManaged">
+             <summary>
+             Allocates a managed vtable that the engine calls back into when iterating
+             entities for a trace. Our ShouldHitEntity function honors EntityIdsToIgnore
+             from the filter (works around the engine's built-in vtable not respecting
+             our skip list).
+            
+             Layout taken from SwiftlyS2: Windows = [Destructor, ShouldHitEntity].
+             </summary>
+        </member>
+        <member name="T:CS2TraceRay.Class.GameTraceExtensions">
+            <summary>
+            Provides extension methods for <see cref="T:CS2TraceRay.Struct.CGameTrace"/> class
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.GameTraceExtensions.DidHit(CS2TraceRay.Struct.CGameTrace)">
+            <summary>
+            Determines if the trace hit anything.
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.GameTraceExtensions.Distance(CS2TraceRay.Struct.CGameTrace)">
+            <summary>
+            Gets the distance between the start and end positions of the trace.
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.GameTraceExtensions.Direction(CS2TraceRay.Struct.CGameTrace)">
+            <summary>
+            Gets the normalized direction vector of the trace.
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.GameTraceExtensions.HitEntityByDesignerName``1(CS2TraceRay.Struct.CGameTrace,``0@,System.String,CS2TraceRay.Enum.DesignerNameMatchType)">
+            <summary>
+            Attempts to get the entity of type <typeparamref name="T"/> if the trace hit an entity
+            with a designer name matching the specified pattern.
+            </summary>
+            <typeparam name="T">The type of entity to check for.</typeparam>
+            <param name="gametrace">The gametrace</param>
+            <param name="entity">The entity that was hit, if any.</param>
+            <param name="designerName">The designer name pattern to match.</param>
+            <param name="matchType">The type of matching to perform.</param>
+            <returns>True if an entity of type <typeparamref name="T"/> matching the pattern was hit, false otherwise.</returns>
+        </member>
+        <member name="M:CS2TraceRay.Class.GameTraceExtensions.HitPlayer(CS2TraceRay.Struct.CGameTrace,CounterStrikeSharp.API.Core.CCSPlayerController@)">
+            <summary>
+            Attempts to get the player controller if the trace hit a player.
+            </summary>
+            <param name="gametrace">The gametrace</param>
+            <param name="player">The player controller that was hit, if any.</param>
+            <returns>True if a player was hit, false otherwise.</returns>
+        </member>
+        <member name="M:CS2TraceRay.Class.GameTraceExtensions.HitWeapon(CS2TraceRay.Struct.CGameTrace,CounterStrikeSharp.API.Core.CBasePlayerWeapon@)">
+            <summary>
+            Attempts to get the weapon if the trace hit a weapon.
+            </summary>
+            <param name="gametrace">The gametrace</param>
+            <param name="weapon">The weapon that was hit, if any.</param>
+            <returns>True if a weapon was hit, false otherwise.</returns>
+        </member>
+        <member name="M:CS2TraceRay.Class.GameTraceExtensions.HitChicken(CS2TraceRay.Struct.CGameTrace,CounterStrikeSharp.API.Core.CChicken@)">
+            <summary>
+            Attempts to get the chicken if the trace hit a chicken.
+            </summary>
+            <param name="gametrace">The gametrace</param>
+            <param name="chicken">The chicken that was hit, if any.</param>
+            <returns>True if a chicken was hit, false otherwise.</returns>
+        </member>
+        <member name="M:CS2TraceRay.Class.GameTraceExtensions.HitButton(CS2TraceRay.Struct.CGameTrace,CounterStrikeSharp.API.Core.CBaseButton@)">
+            <summary>
+            Attempts to get the button if the trace hit a button.
+            </summary>
+            <param name="gametrace">The gametrace</param>
+            <param name="button">The button that was hit, if any.</param>
+            <returns>True if a button was hit, false otherwise.</returns>
+        </member>
+        <member name="M:CS2TraceRay.Class.GameTraceExtensions.HitBuyzone(CS2TraceRay.Struct.CGameTrace,CounterStrikeSharp.API.Core.CBuyZone@)">
+            <summary>
+            Attempts to get the buyzone if the trace hit a buyzone.
+            </summary>
+            <param name="gametrace">The gametrace</param>
+            <param name="buyzone">The buyzone that was hit, if any.</param>
+            <returns>True if a buyzone was hit, false otherwise.</returns>
+        </member>
+        <member name="M:CS2TraceRay.Class.GameTraceExtensions.HitSky(CS2TraceRay.Struct.CGameTrace,CounterStrikeSharp.API.Core.CEnvSky@)">
+            <summary>
+            Attempts to get the sky if the trace hit the sky.
+            </summary>
+            <param name="gametrace">The gametrace</param>
+            <param name="sky">The sky that was hit, if any.</param>
+            <returns>True if the sky was hit, false otherwise.</returns>
+        </member>
+        <member name="M:CS2TraceRay.Class.GameTraceExtensions.HitDoor(CS2TraceRay.Struct.CGameTrace,CounterStrikeSharp.API.Core.CBaseDoor@)">
+            <summary>
+            Attempts to get the door if the trace hit a door.
+            </summary>
+            <param name="gametrace">The gametrace</param>
+            <param name="door">The door that was hit, if any.</param>
+            <returns>True if a door was hit, false otherwise.</returns>
+        </member>
+        <member name="M:CS2TraceRay.Class.GameTraceExtensions.HitDoor(CS2TraceRay.Struct.CGameTrace,CounterStrikeSharp.API.Core.CRotDoor@)">
+            <summary>
+            Attempts to get the rotating door if the trace hit a rotating door.
+            </summary>
+            <param name="gametrace">The gametrace</param>
+            <param name="door">The rotating door that was hit, if any.</param>
+            <returns>True if a rotating door was hit, false otherwise.</returns>
+        </member>
+        <member name="M:CS2TraceRay.Class.GameTraceExtensions.HitLadder(CS2TraceRay.Struct.CGameTrace,CounterStrikeSharp.API.Core.CFuncLadder@)">
+            <summary>
+            Attempts to get the ladder if the trace hit a ladder.
+            </summary>
+            <param name="gametrace">The gametrace</param>
+            <param name="ladder">The ladder that was hit, if any.</param>
+            <returns>True if a ladder was hit, false otherwise.</returns>
+        </member>
+        <member name="M:CS2TraceRay.Class.GameTraceExtensions.HitGrenade(CS2TraceRay.Struct.CGameTrace,CounterStrikeSharp.API.Core.CBaseCSGrenade@)">
+            <summary>
+            Attempts to get the grenade if the trace hit a grenade.
+            </summary>
+            <param name="gametrace">The gametrace</param>
+            <param name="grenade">The grenade that was hit, if any.</param>
+            <returns>True if a grenade was hit, false otherwise.</returns>
+        </member>
+        <member name="M:CS2TraceRay.Class.GameTraceExtensions.HitPlantedC4(CS2TraceRay.Struct.CGameTrace,CounterStrikeSharp.API.Core.CPlantedC4@)">
+            <summary>
+            Attempts to get the planted C4 if the trace hit a planted C4.
+            </summary>
+            <param name="gametrace">The gametrace</param>
+            <param name="c4">The planted C4 that was hit, if any.</param>
+            <returns>True if a planted C4 was hit, false otherwise.</returns>
+        </member>
+        <member name="M:CS2TraceRay.Class.GameTraceExtensions.HitPointWorldText(CS2TraceRay.Struct.CGameTrace,CounterStrikeSharp.API.Core.CPointWorldText@)">
+            <summary>
+            Attempts to get the world text if the trace hit a point world text.
+            </summary>
+            <param name="gametrace">The gametrace</param>
+            <param name="pointWorldText">The point world text that was hit, if any.</param>
+            <returns>True if a point world text was hit, false otherwise.</returns>
+        </member>
+        <member name="M:CS2TraceRay.Class.GameTraceExtensions.HitC4(CS2TraceRay.Struct.CGameTrace,CounterStrikeSharp.API.Core.CC4@)">
+            <summary>
+            Attempts to get the C4 if the trace hit a C4 weapon.
+            </summary>
+            <param name="gametrace">The gametrace</param>
+            <param name="c4">The C4 weapon that was hit, if any.</param>
+            <returns>True if a C4 weapon was hit, false otherwise.</returns>
+        </member>
+        <member name="M:CS2TraceRay.Class.GameTraceExtensions.HitWorld(CS2TraceRay.Struct.CGameTrace,CounterStrikeSharp.API.Core.CWorld@)">
+            <summary>
+            Attempts to get the world entity if the trace hit the world.
+            </summary>
+            <param name="gametrace">The gametrace</param>
+            <param name="world">The world entity that was hit, if any.</param>
+            <returns>True if the world was hit, false otherwise.</returns>
+        </member>
+        <member name="T:CS2TraceRay.Class.PlayerExtensions">
+            <summary>
+            Provides extension methods for <see cref="T:CounterStrikeSharp.API.Core.CCSPlayerController"/> and <see cref="T:CounterStrikeSharp.API.Core.CCSPlayerPawn"/> classes
+            to support various player-related operations including trace rays and position calculations.
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.PlayerExtensions.GetGameTraceByEyePosition(CounterStrikeSharp.API.Core.CCSPlayerController,CS2TraceRay.Enum.TraceMask,CS2TraceRay.Enum.Contents,CounterStrikeSharp.API.Core.CCSPlayerController)">
+            <summary>
+            Performs a game trace from the player's eye position in the direction they are looking.
+            </summary>
+            <param name="player">The player controller to trace from.</param>
+            <param name="mask">The trace mask to use for collision detection.</param>
+            <param name="contents">The content flags to filter the trace.</param>
+            <param name="skipPlayer">Optional player whose pawn should be ignored in the trace.</param>
+            <returns>A <see cref="T:CS2TraceRay.Struct.CGameTrace"/> object containing the trace results, or null if the trace couldn't be performed.</returns>
+        </member>
+        <member name="M:CS2TraceRay.Class.PlayerExtensions.GetGameTraceByEyePosition(CounterStrikeSharp.API.Core.CCSPlayerPawn,CS2TraceRay.Enum.TraceMask,CS2TraceRay.Enum.Contents,CounterStrikeSharp.API.Core.CCSPlayerController)">
+            <summary>
+            Performs a game trace from the player pawn's eye position in the direction they are looking.
+            </summary>
+            <param name="playerPawn">The player pawn to trace from.</param>
+            <param name="mask">The trace mask to use for collision detection.</param>
+            <param name="contents">The contents flags to filter the trace.</param>
+            <param name="skipPlayer">Optional player whose pawn should be ignored in the trace.</param>
+            <returns>A <see cref="T:CS2TraceRay.Struct.CGameTrace"/> object containing the trace results, or null if the trace couldn't be performed.</returns>
+        </member>
+        <member name="M:CS2TraceRay.Class.PlayerExtensions.GetEyePosition(CounterStrikeSharp.API.Core.CCSPlayerController)">
+            <summary>
+            Gets the eye position of the player in world coordinates.
+            </summary>
+            <param name="player">The player controller to get the eye position from.</param>
+            <returns>A <see cref="T:CounterStrikeSharp.API.Modules.Utils.Vector"/> representing the eye position, or null if the position couldn't be determined.</returns>
+        </member>
+        <member name="M:CS2TraceRay.Class.PlayerExtensions.GetEyePosition(CounterStrikeSharp.API.Core.CCSPlayerPawn)">
+            <summary>
+            Gets the eye position of the player pawn in world coordinates.
+            </summary>
+            <param name="playerPawn">The player pawn to get the eye position from.</param>
+            <returns>A <see cref="T:CounterStrikeSharp.API.Modules.Utils.Vector"/> representing the eye position, or null if the position couldn't be determined.</returns>
+        </member>
+        <member name="M:CS2TraceRay.Class.PlayerExtensions.GetGroundDistance(CounterStrikeSharp.API.Core.CCSPlayerController)">
+            <summary>
+            Gets the vertical distance from the player to the ground below them.
+            </summary>
+            <param name="player">The player controller to measure from.</param>
+            <returns>The distance in units, or 0 if the player is on the ground or the measurement couldn't be taken.</returns>
+        </member>
+        <member name="M:CS2TraceRay.Class.PlayerExtensions.GetGroundDistance(CounterStrikeSharp.API.Core.CCSPlayerPawn)">
+            <summary>
+            Gets the vertical distance from the player pawn to the ground below them.
+            </summary>
+            <param name="playerPawn">The player pawn to measure from.</param>
+            <returns>The distance in units, or 0 if the player is on the ground or the measurement couldn't be taken.</returns>
+        </member>
+        <member name="M:CS2TraceRay.Class.PlayerExtensions.GetInteractsWith(CounterStrikeSharp.API.Core.CCSPlayerPawn)">
+            <summary>
+            Retrieves the bitmask representing the content layers this pawn interacts with (trace mask).
+            Commonly used in trace and collision filtering logic.
+            </summary>
+            <param name="pawn">The player pawn instance.</param>
+            <returns>The interaction bitmask from the pawn's collision attributes.</returns>
+        </member>
+        <member name="M:CS2TraceRay.Class.PlayerExtensions.GetHierarchyId(CounterStrikeSharp.API.Core.CCSPlayerPawn)">
+            <summary>
+            Retrieves the hierarchy ID used for organizing entity relationships during collision detection.
+            This ID helps optimize trace results by skipping or including entities based on hierarchy context.
+            </summary>
+            <param name="pawn">The player pawn instance.</param>
+            <returns>The hierarchy ID from the pawn's collision attributes.</returns>
+        </member>
+        <member name="T:CS2TraceRay.Class.TraceRay">
+            <summary>
+            Provides static methods for performing trace operations in CS2.
+            </summary>
+            <summary>
+            Provides extension methods for <see cref="T:CS2TraceRay.Class.TraceRay"/> class
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.QAngle,System.UInt64,System.UInt64,System.IntPtr)">
+            <summary>
+            Performs a trace from origin in the direction of angle with specified mask and content flags
+            </summary>
+            <param name="origin">Starting position of the trace</param>
+            <param name="angle">Direction of the trace</param>
+            <param name="mask">Trace mask flags as ulong</param>
+            <param name="content">Content flags as ulong</param>
+            <param name="skip">Entity to skip (IntPtr handle)</param>
+            <returns>CGameTrace containing the trace results</returns>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.Vector,System.UInt64,System.UInt64,System.IntPtr)">
+            <summary>
+            Performs a trace from origin to end with specified mask and content flags
+            </summary>
+            <param name="start">Starting position of the trace</param>
+            <param name="end">Ending position of the trace</param>
+            <param name="mask">Trace mask flags as ulong</param>
+            <param name="content">Content flags as ulong</param>
+            <param name="skip">Entity to skip (IntPtr handle)</param>
+            <returns>CGameTrace containing the trace results</returns>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShapeWithResult(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.QAngle,System.UInt64,System.UInt64,System.IntPtr,System.Boolean@)">
+            <summary>
+            Performs a trace from origin in the direction of angle with specified mask and content flags
+            </summary>
+            <param name="origin">Starting position of the trace</param>
+            <param name="angle">Direction of the trace</param>
+            <param name="mask">Trace mask flags as ulong</param>
+            <param name="content">Content flags as ulong</param>
+            <param name="skip">Entity to skip (IntPtr handle)</param>
+            <param name="result">Return of _traceShape</param>
+            <returns>CGameTrace containing the trace results</returns>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShapeWithResult(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.Vector,System.UInt64,System.UInt64,System.IntPtr,System.Boolean@)">
+            <summary>
+            Performs a trace from origin to end with specified mask and content flags
+            </summary>
+            <param name="start">Starting position of the trace</param>
+            <param name="end">Ending position of the trace</param>
+            <param name="mask">Trace mask flags as ulong</param>
+            <param name="content">Content flags as ulong</param>
+            <param name="skip">Entity to skip (IntPtr handle)</param>
+            <param name="result">Return of _traceShape</param>
+            <returns>CGameTrace containing the trace results</returns>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceHull(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.Vector,CS2TraceRay.Struct.CTraceFilter,CS2TraceRay.Struct.Ray)">
+            <summary>
+            Performs a hull-based ray trace using the provided shape, direction, and filter information.
+            This method wraps the native _traceShapeRayFilter call, setting up the necessary filter and trace data on the stack.
+            </summary>
+            <param name="start">Starting position of the trace</param>
+            <param name="end">Starting position of the trace</param>
+            <param name="filter"> The filter used to determine which entities or collisions should be excluded during the trace./// </param>
+            <param name="ray">A pointer to the shape of the ray (e.g., line, sphere, hull, capsule, mesh) to be traced.</param>
+            <returns>
+            Returns a <see cref="T:CS2TraceRay.Struct.CGameTrace"/> structure containing the result of the trace operation, including hit data, entity, and surface details.
+            </returns>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceHullManaged(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.Vector,CS2TraceRay.Struct.CTraceFilter,CS2TraceRay.Struct.Ray)">
+            <summary>Same as TraceHull but uses our managed vtable so EntityIdsToIgnore /
+            OwnerIdsToIgnore are actually honored (engine's built-in vtable doesn't check
+            them at the offsets we set).</summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceHullWithResult(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.Vector,CS2TraceRay.Struct.CTraceFilter,CS2TraceRay.Struct.Ray,System.Boolean@)">
+            <summary>
+            Performs a hull-based ray trace using the provided shape, direction, and filter information.
+            This method wraps the native _traceShapeRayFilter call, setting up the necessary filter and trace data on the stack.
+            </summary>
+            <param name="start">Starting position of the trace</param>
+            <param name="end">Starting position of the trace</param>
+            <param name="filter"> The filter used to determine which entities or collisions should be excluded during the trace./// </param>
+            <param name="ray">A pointer to the shape of the ray (e.g., line, sphere, hull, capsule, mesh) to be traced.</param>
+            <param name="result">Return of _traceShape</param>
+            <returns>
+            Returns a <see cref="T:CS2TraceRay.Struct.CGameTrace"/> structure containing the result of the trace operation, including hit data, entity, and surface details.
+            </returns>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.QAngle,CS2TraceRay.Enum.TraceMask,CS2TraceRay.Enum.Contents,CounterStrikeSharp.API.Core.CCSPlayerController)">
+            <summary>
+            Performs a trace from origin in the direction of angle with specified mask and content flags, skipping a player controller
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.QAngle,CS2TraceRay.Enum.TraceMask,System.UInt64,System.IntPtr)">
+            <summary>
+            Performs a trace from origin in the direction of angle with specified mask and content flags
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.QAngle,System.UInt64,CS2TraceRay.Enum.Contents,System.IntPtr)">
+            <summary>
+            Performs a trace from origin in the direction of angle with specified mask and content flags
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.QAngle,CS2TraceRay.Enum.TraceMask,CS2TraceRay.Enum.Contents,System.IntPtr)">
+            <summary>
+            Performs a trace from origin in the direction of angle with specified mask and content flags
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.QAngle,CS2TraceRay.Enum.Contents,System.UInt64,System.IntPtr)">
+            <summary>
+            Performs a trace from origin in the direction of angle with specified mask and content flags
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.QAngle,CS2TraceRay.Enum.Contents,CS2TraceRay.Enum.Contents,System.IntPtr)">
+            <summary>
+            Performs a trace from origin in the direction of angle with specified mask and content flags
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.QAngle,CS2TraceRay.Enum.Contents,System.IntPtr)">
+            <summary>
+            Performs a trace from origin in the direction of angle with specified content flags
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.QAngle,CS2TraceRay.Enum.TraceMask,System.IntPtr)">
+            <summary>
+            Performs a trace from origin in the direction of angle with specified mask flags
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.QAngle,System.UInt64,System.IntPtr)">
+            <summary>
+            Performs a trace from origin in the direction of angle with raw mask value
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.QAngle,CS2TraceRay.Enum.Contents,CounterStrikeSharp.API.Core.CCSPlayerController)">
+            <summary>
+            Performs a trace from origin in the direction of angle with specified content flags, skipping a player controller
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.QAngle,CS2TraceRay.Enum.TraceMask,System.UInt64,CounterStrikeSharp.API.Core.CCSPlayerController)">
+            <summary>
+            Performs a trace from origin in the direction of angle with specified mask and raw content value, skipping a player controller
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.QAngle,System.UInt64,CS2TraceRay.Enum.Contents,CounterStrikeSharp.API.Core.CCSPlayerController)">
+            <summary>
+            Performs a trace from origin in the direction of angle with raw mask and content flags, skipping a player controller
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.QAngle,CS2TraceRay.Enum.Contents,System.UInt64,CounterStrikeSharp.API.Core.CCSPlayerController)">
+            <summary>
+            Performs a trace from origin in the direction of angle with specified mask and raw content value, skipping a player controller
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.QAngle,System.UInt64,System.UInt64,CounterStrikeSharp.API.Core.CCSPlayerController)">
+            <summary>
+            Performs a trace from origin in the direction of angle with raw mask and content values, skipping a player controller
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.QAngle,CS2TraceRay.Enum.Contents,CS2TraceRay.Enum.Contents,CounterStrikeSharp.API.Core.CCSPlayerController)">
+            <summary>
+            Performs a trace from origin in the direction of angle with specified mask and content flags, skipping a player controller
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.QAngle,CS2TraceRay.Enum.TraceMask,CounterStrikeSharp.API.Core.CCSPlayerController)">
+            <summary>
+            Performs a trace from origin in the direction of angle with specified mask flags, skipping a player controller
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.QAngle,System.UInt64,CounterStrikeSharp.API.Core.CCSPlayerController)">
+            <summary>
+            Performs a trace from origin in the direction of angle with raw mask value, skipping a player controller
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.QAngle,CS2TraceRay.Enum.TraceMask,CS2TraceRay.Enum.Contents,CounterStrikeSharp.API.Core.CCSPlayerPawn)">
+            <summary>
+            Performs a trace from origin in the direction of angle with specified mask and content flags, skipping a player pawn
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.QAngle,CS2TraceRay.Enum.Contents,CounterStrikeSharp.API.Core.CCSPlayerPawn)">
+            <summary>
+            Performs a trace from origin in the direction of angle with specified content flags, skipping a player pawn
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.QAngle,CS2TraceRay.Enum.TraceMask,System.UInt64,CounterStrikeSharp.API.Core.CCSPlayerPawn)">
+            <summary>
+            Performs a trace from origin in the direction of angle with specified mask and raw content value, skipping a player pawn
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.QAngle,System.UInt64,CS2TraceRay.Enum.Contents,CounterStrikeSharp.API.Core.CCSPlayerPawn)">
+            <summary>
+            Performs a trace from origin in the direction of angle with raw mask and content flags, skipping a player pawn
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.QAngle,CS2TraceRay.Enum.Contents,System.UInt64,CounterStrikeSharp.API.Core.CCSPlayerPawn)">
+            <summary>
+            Performs a trace from origin in the direction of angle with specified mask and raw content value, skipping a player pawn
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.QAngle,System.UInt64,System.UInt64,CounterStrikeSharp.API.Core.CCSPlayerPawn)">
+            <summary>
+            Performs a trace from origin in the direction of angle with raw mask and content values, skipping a player pawn
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.QAngle,CS2TraceRay.Enum.Contents,CS2TraceRay.Enum.Contents,CounterStrikeSharp.API.Core.CCSPlayerPawn)">
+            <summary>
+            Performs a trace from origin in the direction of angle with specified mask and content flags, skipping a player pawn
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.QAngle,CS2TraceRay.Enum.TraceMask,CounterStrikeSharp.API.Core.CCSPlayerPawn)">
+            <summary>
+            Performs a trace from origin in the direction of angle with specified mask flags, skipping a player pawn
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.QAngle,System.UInt64,CounterStrikeSharp.API.Core.CCSPlayerPawn)">
+            <summary>
+            Performs a trace from origin in the direction of angle with raw mask value, skipping a player pawn
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.Vector,CS2TraceRay.Enum.TraceMask,System.UInt64,System.IntPtr)">
+            <summary>
+            Performs a trace from origin to end with specified mask and content flags
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.Vector,System.UInt64,CS2TraceRay.Enum.Contents,System.IntPtr)">
+            <summary>
+            Performs a trace from origin to end with raw mask and content flags
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.Vector,CS2TraceRay.Enum.TraceMask,CS2TraceRay.Enum.Contents,System.IntPtr)">
+            <summary>
+            Performs a trace from origin to end with specified mask and content flags
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.Vector,CS2TraceRay.Enum.Contents,System.UInt64,System.IntPtr)">
+            <summary>
+            Performs a trace from origin to end with specified mask and raw content value
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.Vector,CS2TraceRay.Enum.Contents,CS2TraceRay.Enum.Contents,System.IntPtr)">
+            <summary>
+            Performs a trace from origin to end with specified mask and content flags
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.Vector,CS2TraceRay.Enum.Contents,System.IntPtr)">
+            <summary>
+            Performs a trace from origin to end with specified content flags
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.Vector,CS2TraceRay.Enum.TraceMask,System.IntPtr)">
+            <summary>
+            Performs a trace from origin to end with specified mask flags
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.Vector,System.UInt64,System.IntPtr)">
+            <summary>
+            Performs a trace from origin to end with raw mask value
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.Vector,CS2TraceRay.Enum.TraceMask,CS2TraceRay.Enum.Contents,CounterStrikeSharp.API.Core.CCSPlayerController)">
+            <summary>
+            Performs a trace from origin to end with specified mask and content flags, skipping a player controller
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.Vector,CS2TraceRay.Enum.Contents,CounterStrikeSharp.API.Core.CCSPlayerController)">
+            <summary>
+            Performs a trace from origin to end with specified content flags, skipping a player controller
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.Vector,CS2TraceRay.Enum.TraceMask,System.UInt64,CounterStrikeSharp.API.Core.CCSPlayerController)">
+            <summary>
+            Performs a trace from origin to end with specified mask and raw content value, skipping a player controller
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.Vector,System.UInt64,CS2TraceRay.Enum.Contents,CounterStrikeSharp.API.Core.CCSPlayerController)">
+            <summary>
+            Performs a trace from origin to end with raw mask and content flags, skipping a player controller
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.Vector,CS2TraceRay.Enum.Contents,System.UInt64,CounterStrikeSharp.API.Core.CCSPlayerController)">
+            <summary>
+            Performs a trace from origin to end with specified mask and raw content value, skipping a player controller
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.Vector,System.UInt64,System.UInt64,CounterStrikeSharp.API.Core.CCSPlayerController)">
+            <summary>
+            Performs a trace from origin to end with raw mask and content values, skipping a player controller
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.Vector,CS2TraceRay.Enum.Contents,CS2TraceRay.Enum.Contents,CounterStrikeSharp.API.Core.CCSPlayerController)">
+            <summary>
+            Performs a trace from origin to end with specified mask and content flags, skipping a player controller
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.Vector,CS2TraceRay.Enum.TraceMask,CounterStrikeSharp.API.Core.CCSPlayerController)">
+            <summary>
+            Performs a trace from origin to end with specified mask flags, skipping a player controller
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.Vector,System.UInt64,CounterStrikeSharp.API.Core.CCSPlayerController)">
+            <summary>
+            Performs a trace from origin to end with raw mask value, skipping a player controller
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.Vector,CS2TraceRay.Enum.TraceMask,CS2TraceRay.Enum.Contents,CounterStrikeSharp.API.Core.CCSPlayerPawn)">
+            <summary>
+            Performs a trace from origin to end with specified mask and content flags, skipping a player pawn
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.Vector,CS2TraceRay.Enum.Contents,CounterStrikeSharp.API.Core.CCSPlayerPawn)">
+            <summary>
+            Performs a trace from origin to end with specified content flags, skipping a player pawn
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.Vector,CS2TraceRay.Enum.TraceMask,System.UInt64,CounterStrikeSharp.API.Core.CCSPlayerPawn)">
+            <summary>
+            Performs a trace from origin to end with specified mask and raw content value, skipping a player pawn
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.Vector,System.UInt64,CS2TraceRay.Enum.Contents,CounterStrikeSharp.API.Core.CCSPlayerPawn)">
+            <summary>
+            Performs a trace from origin to end with raw mask and content flags, skipping a player pawn
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.Vector,CS2TraceRay.Enum.Contents,System.UInt64,CounterStrikeSharp.API.Core.CCSPlayerPawn)">
+            <summary>
+            Performs a trace from origin to end with specified mask and raw content value, skipping a player pawn
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.Vector,System.UInt64,System.UInt64,CounterStrikeSharp.API.Core.CCSPlayerPawn)">
+            <summary>
+            Performs a trace from origin to end with raw mask and content values, skipping a player pawn
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.Vector,CS2TraceRay.Enum.Contents,CS2TraceRay.Enum.Contents,CounterStrikeSharp.API.Core.CCSPlayerPawn)">
+            <summary>
+            Performs a trace from origin to end with specified mask and content flags, skipping a player pawn
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.Vector,CS2TraceRay.Enum.TraceMask,CounterStrikeSharp.API.Core.CCSPlayerPawn)">
+            <summary>
+            Performs a trace from origin to end with specified mask flags, skipping a player pawn
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.Vector,System.UInt64,CounterStrikeSharp.API.Core.CCSPlayerPawn)">
+            <summary>
+            Performs a trace from origin to end with raw mask value, skipping a player pawn
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.QAngle,CS2TraceRay.Enum.TraceMask,CS2TraceRay.Enum.TraceMask,System.IntPtr)">
+            <summary>
+            Performs a trace from origin in the direction of angle with specified mask and content flags (both as TraceMask)
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.Vector,CS2TraceRay.Enum.Contents,CS2TraceRay.Enum.TraceMask,CounterStrikeSharp.API.Core.CCSPlayerController)">
+            <summary>
+            Performs a trace from origin to end with specified mask (as Contents) and content (as TraceMask), skipping a player controller
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.QAngle,CS2TraceRay.Enum.TraceMask,CS2TraceRay.Enum.TraceMask,CounterStrikeSharp.API.Core.CCSPlayerPawn)">
+            <summary>
+            Performs a trace from origin in the direction of angle with specified mask and content flags (both as TraceMask), skipping a player pawn
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.QAngle,CS2TraceRay.Enum.Contents,CS2TraceRay.Enum.TraceMask,System.IntPtr)">
+            <summary>
+            Performs a trace from origin in the direction of angle with specified mask (as Contents) and content (as TraceMask)
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.QAngle,CS2TraceRay.Enum.TraceMask,CS2TraceRay.Enum.TraceMask,CounterStrikeSharp.API.Core.CCSPlayerController)">
+            <summary>
+            Performs a trace from origin in the direction of angle with specified mask and content flags (both as TraceMask), skipping a player controller
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.QAngle,CS2TraceRay.Enum.Contents,CS2TraceRay.Enum.TraceMask,CounterStrikeSharp.API.Core.CCSPlayerController)">
+            <summary>
+            Performs a trace from origin in the direction of angle with specified mask (as Contents) and content (as TraceMask), skipping a player controller
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.QAngle,CS2TraceRay.Enum.Contents,CS2TraceRay.Enum.TraceMask,CounterStrikeSharp.API.Core.CCSPlayerPawn)">
+            <summary>
+            Performs a trace from origin in the direction of angle with specified mask (as Contents) and content (as TraceMask), skipping a player pawn
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.Vector,CS2TraceRay.Enum.TraceMask,CS2TraceRay.Enum.TraceMask,System.IntPtr)">
+            <summary>
+            Performs a trace from origin to end with specified mask and content flags (both as TraceMask)
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.Vector,CS2TraceRay.Enum.Contents,CS2TraceRay.Enum.TraceMask,System.IntPtr)">
+            <summary>
+            Performs a trace from origin to end with specified mask (as Contents) and content (as TraceMask)
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.Vector,CS2TraceRay.Enum.TraceMask,CS2TraceRay.Enum.TraceMask,CounterStrikeSharp.API.Core.CCSPlayerController)">
+            <summary>
+            Performs a trace from origin to end with specified mask and content flags (both as TraceMask), skipping a player controller
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.Vector,CS2TraceRay.Enum.TraceMask,CS2TraceRay.Enum.TraceMask,CounterStrikeSharp.API.Core.CCSPlayerPawn)">
+            <summary>
+            Performs a trace from origin to end with specified mask and content flags (both as TraceMask), skipping a player pawn
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Class.TraceRay.TraceShape(CounterStrikeSharp.API.Modules.Utils.Vector,CounterStrikeSharp.API.Modules.Utils.Vector,CS2TraceRay.Enum.Contents,CS2TraceRay.Enum.TraceMask,CounterStrikeSharp.API.Core.CCSPlayerPawn)">
+            <summary>
+            Performs a trace from origin to end with specified mask (as Contents) and content (as TraceMask), skipping a player pawn
+            </summary>
+        </member>
+        <member name="T:CS2TraceRay.Enum.Contents">
+            <summary>
+            Bitmask flags representing collision layers and content types in CS2.
+            Used for trace operations to filter what should be hit.
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.Empty">
+            <summary>Empty</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.Solid">
+            <summary>Solid</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.Hitbox">
+            <summary>Hitbox</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.Trigger">
+            <summary>Trigger</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.Sky">
+            <summary>Sky</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.PlayerClip">
+            <summary>PlayerClip</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.NpcClip">
+            <summary>NpcClip</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.BlockLos">
+            <summary>BlockLos</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.BlockLight">
+            <summary>BlockLight</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.Ladder">
+            <summary>Ladder</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.Pickup">
+            <summary>Pickup</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.BlockSound">
+            <summary>BlockSound</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.NoDraw">
+            <summary>NoDraw</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.Window">
+            <summary>Window</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.PassBullets">
+            <summary>PassBullets</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.WorldGeometry">
+            <summary>WorldGeometry</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.Water">
+            <summary>Water</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.Slime">
+            <summary>Slime</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.TouchAll">
+            <summary>TouchAll</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.Player">
+            <summary>Player</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.Npc">
+            <summary>Npc</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.Debris">
+            <summary>Debris</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.PhysicsProp">
+            <summary>PhysicsProp</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.NavIgnore">
+            <summary>NavIgnore</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.NavLocalIgnore">
+            <summary>NavLocalIgnore</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.PostProcessingVolume">
+            <summary>PostProcessingVolume</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.UnusedLayer3">
+            <summary>UnusedLayer3</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.CarriedObject">
+            <summary>CarriedObject</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.Pushaway">
+            <summary>Pushaway</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.ServerEntityOnClient">
+            <summary>ServerEntityOnClient</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.CarriedWeapon">
+            <summary>CarriedWeapon</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.StaticLevel">
+            <summary>StaticLevel</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.CsgoTeam1">
+            <summary>CsgoTeam1</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.CsgoTeam2">
+            <summary>CsgoTeam2</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.CsgoGrenadeClip">
+            <summary>CsgoGrenadeClip</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.CsgoDroneClip">
+            <summary>CsgoDroneClip</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.CsgoMoveable">
+            <summary>CsgoMoveable</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.CsgoOpaque">
+            <summary>CsgoOpaque</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.CsgoMonster">
+            <summary>CsgoMonster</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.CsgoUnusedLayer">
+            <summary>CsgoUnusedLayer</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.Contents.CsgoThrownGrenade">
+            <summary>CsgoThrownGrenade</summary>
+        </member>
+        <member name="T:CS2TraceRay.Enum.CsgoLayerIndex">
+            <summary>
+            Specific layer indices used for content masking
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.CsgoLayerIndex.Team1">
+            <summary>Team 1 layer</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.CsgoLayerIndex.Team2">
+            <summary>Team 2 layer</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.CsgoLayerIndex.GrenadeClip">
+            <summary>Grenade collision layer</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.CsgoLayerIndex.DroneClip">
+            <summary>Drone collision layer</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.CsgoLayerIndex.Moveable">
+            <summary>Movable physics objects layer</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.CsgoLayerIndex.Opaque">
+            <summary>Opaque surfaces layer</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.CsgoLayerIndex.Monster">
+            <summary>Monster/NPC layer</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.CsgoLayerIndex.UnusedLayer">
+            <summary>Unused/reserved layer</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.CsgoLayerIndex.ThrownGrenade">
+            <summary>Thrown grenade entities layer</summary>
+        </member>
+        <member name="T:CS2TraceRay.Enum.DesignerNameMatchType">
+            <summary>
+            Specifies the type of matching to perform on the designer name.
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.DesignerNameMatchType.Equals">
+            <summary>
+            Matches if the designer name is exactly equal to the specified string.
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.DesignerNameMatchType.StartsWith">
+            <summary>
+            Matches if the designer name starts with the specified string.
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.DesignerNameMatchType.EndsWith">
+            <summary>
+            Matches if the designer name ends with the specified string.
+            </summary>
+        </member>
+        <member name="T:CS2TraceRay.Enum.LayerIndex">
+            <summary>
+            Defines base layer indices used for collision detection and tracing
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.LayerIndex.Solid">
+            <summary>Solid objects layer</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.LayerIndex.Hitbox">
+            <summary>Hitbox collision layer</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.LayerIndex.Trigger">
+            <summary>Trigger volume layer</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.LayerIndex.Sky">
+            <summary>Skybox layer</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.LayerIndex.FirstUser">
+            <summary>First available layer for user-defined content</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.LayerIndex.NotFound">
+            <summary>Special value indicating layer not found</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.LayerIndex.MaxAllowed">
+            <summary>Maximum allowed layer index</summary>
+        </member>
+        <member name="T:CS2TraceRay.Enum.RayType">
+            <summary>
+            Specifies the geometric shape of a ray used in tracing and collision detection operations.
+            Determines how the underlying ray data should be interpreted during a trace.
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.RayType.Line">
+            <summary>
+            A straight line with optional thickness (radius). Default shape for basic traces.
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.RayType.Sphere">
+            <summary>
+            A spherical shape used for proximity or point-radius-based traces.
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.RayType.Hull">
+            <summary>
+            An axis-aligned bounding box (AABB) used for volume-based tracing.
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.RayType.Capsule">
+            <summary>
+            A capsule shape defined by two points and a radius. Suitable for player bounding volumes.
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.RayType.Mesh">
+            <summary>
+            A custom mesh composed of multiple vertices for complex trace geometry.
+            </summary>
+        </member>
+        <member name="T:CS2TraceRay.Enum.StandardLayerIndex">
+            <summary>
+            Standard layer indices used for content masking
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.StandardLayerIndex.PlayerClip">
+            <summary>PlayerClip</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.StandardLayerIndex.NpcClip">
+            <summary>NpcClip</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.StandardLayerIndex.BlockLos">
+            <summary>BlockLos</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.StandardLayerIndex.BlockLight">
+            <summary>BlockLight</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.StandardLayerIndex.Ladder">
+            <summary>Ladder</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.StandardLayerIndex.Pickup">
+            <summary>Pickup</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.StandardLayerIndex.BlockSound">
+            <summary>BlockSound</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.StandardLayerIndex.NoDraw">
+            <summary>NoDraw</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.StandardLayerIndex.Window">
+            <summary>Window</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.StandardLayerIndex.PassBullets">
+            <summary>PassBullets</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.StandardLayerIndex.WorldGeometry">
+            <summary>WorldGeometry</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.StandardLayerIndex.Water">
+            <summary>Water</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.StandardLayerIndex.Slime">
+            <summary>Slime</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.StandardLayerIndex.TouchAll">
+            <summary>TouchAll</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.StandardLayerIndex.Player">
+            <summary>Player</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.StandardLayerIndex.Npc">
+            <summary>Npc</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.StandardLayerIndex.Debris">
+            <summary>Debris</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.StandardLayerIndex.PhysicsProp">
+            <summary>PhysicsProp</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.StandardLayerIndex.NavIgnore">
+            <summary>NavIgnore</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.StandardLayerIndex.NavLocalIgnore">
+            <summary>NavLocalIgnore</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.StandardLayerIndex.PostProcessingVolume">
+            <summary>PostProcessingVolume</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.StandardLayerIndex.UnusedLayer3">
+            <summary>UnusedLayer3</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.StandardLayerIndex.CarriedObject">
+            <summary>CarriedObject</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.StandardLayerIndex.Pushaway">
+            <summary>Pushaway</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.StandardLayerIndex.ServerEntityOnClient">
+            <summary>ServerEntityOnClient</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.StandardLayerIndex.CarriedWeapon">
+            <summary>CarriedWeapon</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.StandardLayerIndex.StaticLevel">
+            <summary>StaticLevel</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.StandardLayerIndex.FirstModSpecific">
+            <summary>FirstModSpecific</summary>
+        </member>
+        <member name="T:CS2TraceRay.Enum.TraceMask">
+            <summary>
+            Predefined trace masks for common collision detection scenarios
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.TraceMask.MaskAll">
+            <summary>Matches everything</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.TraceMask.MaskSolid">
+            <summary>Everything that is normally solid</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.TraceMask.MaskPlayerSolid">
+            <summary>Everything that blocks player movement</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.TraceMask.MaskNpcSolid">
+            <summary>Blocks NPC movement</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.TraceMask.MaskNpcFluid">
+            <summary>Blocks fluid movement</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.TraceMask.MaskWater">
+            <summary>Water physics contents</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.TraceMask.MaskShot">
+            <summary>Contents that bullets see as solid</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.TraceMask.MaskShotBrushOnly">
+            <summary>Bullet collision (world+brush only, no monsters)</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.TraceMask.MaskShotHull">
+            <summary>Non-raycasted weapons collision (includes grates)</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.TraceMask.MaskShotPortal">
+            <summary>Portal gun trace collision</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.TraceMask.MaskSolidBrushOnly">
+            <summary>Solid contents (world+brush only, no monsters)</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.TraceMask.MaskPlayerSolidBrushOnly">
+            <summary>Player movement collision (world+brush only, no monsters)</summary>
+        </member>
+        <member name="F:CS2TraceRay.Enum.TraceMask.MaskNpcSolidBrushOnly">
+            <summary>NPC movement collision (world+brush only, no monsters)</summary>
+        </member>
+        <member name="T:CS2TraceRay.Struct.Capsule">
+            <summary>
+            Represents a 3D capsule shape defined by two centers and a radius.
+            Commonly used in collision detection and physics systems.
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Struct.Capsule.CenterA">
+            <summary>
+            The center point of one end of the capsule.
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Struct.Capsule.CenterB">
+            <summary>
+            The center point of the opposite end of the capsule.
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Struct.Capsule.Radius">
+            <summary>
+            The radius of the capsule.
+            </summary>
+        </member>
+        <member name="T:CS2TraceRay.Struct.CGameTrace">
+            <summary>
+            Represents the results of a game trace operation, containing information about what was hit.
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Struct.CGameTrace.Surface">
+            <summary>
+            The surface that was hit by the trace.
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Struct.CGameTrace.HitEntity">
+            <summary>
+            The entity that was hit by the trace.
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Struct.CGameTrace.HitboxData">
+            <summary>
+            Pointer to the hitbox data if a hitbox was hit.
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Struct.CGameTrace.Contents">
+            <summary>
+            The contents at the point of impact.
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Struct.CGameTrace.StartPos">
+            <summary>
+            The starting position of the trace.
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Struct.CGameTrace.EndPos">
+            <summary>
+            The end position of the trace.
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Struct.CGameTrace.Normal">
+            <summary>
+            The surface normal at the point of impact.
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Struct.CGameTrace.Position">
+            <summary>
+            The exact position where the trace hit.
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Struct.CGameTrace.Fraction">
+            <summary>
+            Fraction of the trace completed when the hit occurred (0.0-1.0).
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Struct.CGameTrace.AllSolid">
+            <summary>
+            Whether the trace was completely inside a solid (no free space).
+            </summary>
+        </member>
+        <member name="T:CS2TraceRay.Struct.CTraceFilter">
+             <summary>
+             Updated CTraceFilter layout matching SwiftlyS2 (which works on current CS2 builds).
+             The original CS2TraceRay layout was outdated — fields had drifted positions, and the
+             engine read garbage where InteractsWith/HitSolid were expected. With this layout the
+             trace correctly hits world brushes.
+            
+             Total size: 72 bytes
+               [0x00] Vtable (filled in by TraceHull from gamedata sig)
+               [0x08] QueryShapeAttributes (56 bytes — see RnQueryShapeAttr_t below)
+               [0x40] IterateEntities (Windows; Linux uses 0x3A)
+             </summary>
+        </member>
+        <member name="M:CS2TraceRay.Struct.CTraceFilter.#ctor(System.UInt32,System.UInt32,System.UInt16)">
+            <summary>Init filter with HitSolid=true so world brushes are tested.</summary>
+        </member>
+        <member name="T:CS2TraceRay.Struct.RnQueryShapeAttr_t">
+            <summary>56-byte shape attributes substructure embedded in CTraceFilter at +0x08.
+            Layout taken from SwiftlyS2 (verified working on current CS2 builds).</summary>
+        </member>
+        <member name="T:CS2TraceRay.Struct.CTraceHitbox">
+            <summary>
+            Represents trace hitbox information including hit group and hitbox ID.
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Struct.CTraceHitbox.HitGroup">
+            <summary>
+            The hit group that was hit by the trace.
+            Common values:
+            0 = Generic
+            1 = Head
+            2 = Chest
+            3 = Stomach
+            4 = Left Arm
+            5 = Right Arm
+            6 = Left Leg
+            7 = Right Leg
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Struct.CTraceHitbox.HitboxId">
+            <summary>
+            The specific hitbox ID that was hit by the trace.
+            Hitbox IDs are model-specific and correspond to hitboxes defined in the model.
+            </summary>
+        </member>
+        <member name="T:CS2TraceRay.Struct.Hull">
+            <summary>
+            Represents an axis-aligned bounding box (AABB) used for spatial queries and collision detection.
+            Defined by minimum and maximum 3D coordinates.
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Struct.Hull.Mins">
+            <summary>
+            The minimum corner of the bounding box (usually the lowest x, y, z values).
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Struct.Hull.Maxs">
+            <summary>
+            The maximum corner of the bounding box (usually the highest x, y, z values).
+            </summary>
+        </member>
+        <member name="T:CS2TraceRay.Struct.Line">
+            <summary>
+            Represents a cylindrical line used in trace or collision tests.
+            Defined by a starting offset and a radius around the path.
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Struct.Line.StartOffset">
+            <summary>
+            The offset from the origin to the start point of the line.
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Struct.Line.Radius">
+            <summary>
+            The radius of the line used to simulate thickness (e.g., swept sphere or capsule).
+            </summary>
+        </member>
+        <member name="T:CS2TraceRay.Struct.Mesh">
+            <summary>
+            Represents a 3D mesh consisting of a set of vertices and bounding box information.
+            Often used in complex collision or trace geometry.
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Struct.Mesh.Mins">
+            <summary>
+            The minimum bounding coordinates (AABB) of the mesh.
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Struct.Mesh.Maxs">
+            <summary>
+            The maximum bounding coordinates (AABB) of the mesh.
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Struct.Mesh.Vertices">
+            <summary>
+            Pointer to an array of vertices in memory.
+            Each vertex is typically a Vector3 or a custom vertex format.
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Struct.Mesh.NumVertices">
+            <summary>
+            Number of vertices in the mesh.
+            </summary>
+        </member>
+        <member name="T:CS2TraceRay.Struct.Ray">
+            <summary>
+            Represents a polymorphic ray shape used in spatial queries and collision detection.
+            This structure can represent a line, sphere, hull (AABB), capsule, or mesh—depending on the constructor used.
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Struct.Ray.Line">
+            <summary>
+            The ray data interpreted as a line.
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Struct.Ray.Sphere">
+            <summary>
+            The ray data interpreted as a sphere.
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Struct.Ray.Hull">
+            <summary>
+            The ray data interpreted as an axis-aligned bounding box (AABB).
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Struct.Ray.Capsule">
+            <summary>
+            The ray data interpreted as a capsule.
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Struct.Ray.Mesh">
+            <summary>
+            The ray data interpreted as a mesh with custom vertices.
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Struct.Ray.Type">
+            <summary>
+            The active ray shape type, used to determine how the union should be interpreted.
+            </summary>
+        </member>
+        <member name="M:CS2TraceRay.Struct.Ray.#ctor(System.Numerics.Vector3)">
+            <summary>
+            Initializes a ray as a simple line with no radius.
+            </summary>
+            <param name="startOffset">The start offset of the line from the origin.</param>
+        </member>
+        <member name="M:CS2TraceRay.Struct.Ray.#ctor(System.Numerics.Vector3,System.Single)">
+            <summary>
+            Initializes a ray as a sphere if the radius is positive, otherwise defaults to a line.
+            </summary>
+            <param name="center">Center of the sphere or line.</param>
+            <param name="radius">Radius of the sphere.</param>
+        </member>
+        <member name="M:CS2TraceRay.Struct.Ray.#ctor(System.Numerics.Vector3,System.Numerics.Vector3)">
+            <summary>
+            Initializes a ray as a hull (AABB) if bounds are not equal, otherwise defaults to a line.
+            </summary>
+            <param name="mins">Minimum bounding box coordinates.</param>
+            <param name="maxs">Maximum bounding box coordinates.</param>
+        </member>
+        <member name="M:CS2TraceRay.Struct.Ray.#ctor(System.Numerics.Vector3,System.Numerics.Vector3,System.Single)">
+            <summary>
+            Initializes a ray as a capsule if the endpoints are distinct and the radius is positive; otherwise falls back to simpler shapes.
+            </summary>
+            <param name="centerA">First endpoint of the capsule.</param>
+            <param name="centerB">Second endpoint of the capsule.</param>
+            <param name="radius">Radius of the capsule.</param>
+        </member>
+        <member name="M:CS2TraceRay.Struct.Ray.#ctor(System.Numerics.Vector3,System.Numerics.Vector3,System.Numerics.Vector3[])">
+            <summary>
+            Initializes a ray as a mesh with custom vertex data.
+            </summary>
+            <param name="mins">Minimum bounding box coordinates of the mesh.</param>
+            <param name="maxs">Maximum bounding box coordinates of the mesh.</param>
+            <param name="vertices">An array of 3D vertices representing the mesh.</param>
+        </member>
+        <member name="T:CS2TraceRay.Struct.Sphere">
+            <summary>
+            Represents a sphere used for spatial queries or collision detection.
+            Defined by its center position and radius.
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Struct.Sphere.Center">
+            <summary>
+            The center point of the sphere in world or local space.
+            </summary>
+        </member>
+        <member name="F:CS2TraceRay.Struct.Sphere.Radius">
+            <summary>
+            The radius of the sphere.
+            </summary>
+        </member>
+    </members>
+</doc>

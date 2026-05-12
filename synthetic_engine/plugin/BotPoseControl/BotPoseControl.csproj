@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>BotPoseControl</RootNamespace>
+    <AssemblyName>BotPoseControl</AssemblyName>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <!-- Need Reloaded.Hooks + FASM at runtime alongside the plugin DLL.
+         CSSharp itself ships with its API/runtime so we still want false-by-default
+         for system assemblies — exclude them via DependencyHostExcludes below. -->
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- ExcludeAssets=runtime — compile-only, CSSharp ships its own runtime copy
+         and we'd ABI-conflict if we shipped duplicates. -->
+    <PackageReference Include="CounterStrikeSharp.API" Version="1.0.367"
+                      ExcludeAssets="runtime" PrivateAssets="all" />
+    <!-- Pure-managed x64 function detour library — DOES need to be deployed
+         alongside the plugin since CSSharp doesn't ship Reloaded.Hooks. -->
+    <PackageReference Include="Reloaded.Hooks" Version="4.3.1" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Local fork of CS2TraceRay with patched static initializer that tolerates
+         missing TraceFunc signature (broken in post-2026-01 CS2 builds). -->
+    <ProjectReference Include="..\CS2TraceRayLocal\CS2TraceRay\CS2TraceRay.csproj" />
+  </ItemGroup>
+</Project>

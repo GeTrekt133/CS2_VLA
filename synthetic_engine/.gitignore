@@ -1,0 +1,3 @@
+# Large binary files excluded from git
+maps_extracted/**/*.glb
+tools/Source2Viewer-CLI.exe
